@@ -1,0 +1,35 @@
+# Web framework
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# Database
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.29.0
+alembic>=1.13.0
+
+# Settings
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+
+# LLM
+openai>=1.30.0
+
+# PDF parsing
+pdfplumber>=0.11.0
+
+# Vector store (choose one — all listed for flexibility)
+chromadb>=0.5.0
+# faiss-cpu>=1.8.0  # uncomment if using FAISS
+
+# Schema validation
+jsonschema>=4.22.0
+
+# Utilities
+python-multipart>=0.0.9   # FastAPI file upload
+httpx>=0.27.0             # async HTTP client (testing)
+tenacity>=8.3.0           # retry logic for LLM calls
+
+# Dev / testing
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+httpx>=0.27.0
