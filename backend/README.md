@@ -73,11 +73,14 @@ cp .env.example .env
 # Edit .env — set OPENAI_API_KEY and DATABASE_URL
 ```
 
+
+
 ### 3. Run with Docker (easiest)
 
 ```bash
-cp .env.example .env        # fill in OPENAI_API_KEY
-docker-compose up --build
+cp .env.example .env
+# Edit .env — set OPENAI_API_KEY
+docker compose up --build
 ```
 
 API available at http://localhost:8000  
@@ -89,6 +92,7 @@ Interactive docs at http://localhost:8000/docs
 # Start Postgres + Redis separately, then:
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
+
 
 ### 5. Run tests
 

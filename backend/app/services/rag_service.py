@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from app.core.config import settings
 from app.core.logger import get_logger
-from app.llm.embeddings import embedder
+from app.llm.embeddings import get_embedder
 
 logger = get_logger(__name__)
 
@@ -94,13 +94,20 @@ def _build_vector_store():
 
 class RagService:
     def __init__(self):
-        self._store = _build_vector_store()
+        self._store = None
+
+    def _ensure_store(self):
+        if self._store is None:
+            self._store = _build_vector_store()
+        return self._store
 
     async def index_document_chunks(self, document_id: str, chunks: list[dict]) -> None:
         """
         Embed all chunks and upsert into the vector store.
         chunks: list of {id, chunk_index, text, section}
         """
+        store = self._ensure_store()
+        embedder = get_embedder()
         texts = [c["text"] for c in chunks]
         embeddings = await embedder.embed_batch(texts)
 
@@ -116,18 +123,19 @@ class RagService:
                 },
             })
 
-        self._store.upsert(document_id, vectors)
+        store.upsert(document_id, vectors)
         logger.info("Indexed %d chunks for document %s", len(chunks), document_id)
 
     async def retrieve_neighbors(
         self, document_id: str, chunk_index: int, window: int = 1
     ) -> list[dict]:
         """Return the adjacent chunks by index (ordered, no embedding needed)."""
+        store = self._ensure_store()
         indices = list(range(
             max(0, chunk_index - window),
             chunk_index + window + 1,
         ))
-        return self._store.get_by_chunk_indices(document_id, indices)
+        return store.get_by_chunk_indices(document_id, indices)
 
     async def retrieve_for_chunk_feedback(
         self, document_id: str, chunk_text: str, user_input: str, top_k: int = 3
@@ -136,8 +144,10 @@ class RagService:
         Hybrid retrieval: embed the user's retell, search within the *current*
         document, and bias results toward the current chunk via metadata filter.
         """
+        store = self._ensure_store()
+        embedder = get_embedder()
         query_emb = await embedder.embed_text(user_input)
-        hits = self._store.query(
+        hits = store.query(
             document_id=document_id,
             query_embedding=query_emb,
             n_results=top_k,
@@ -150,6 +160,3 @@ class RagService:
         """Return current + adjacent chunks to provide context for summarisation."""
         return await self.retrieve_neighbors(document_id, chunk_index, window=1)
 
-
-# Module-level singleton
-rag_service = RagService()

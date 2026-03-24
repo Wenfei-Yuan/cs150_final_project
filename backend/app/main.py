@@ -20,12 +20,15 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting %s …", settings.APP_NAME)
-    # DB table creation is handled by Alembic migrations in production.
-    # For quick local dev, uncomment the lines below:
-    # from app.db.session import engine
-    # from app.db.base import Base
-    # async with engine.begin() as conn:
-    #     await conn.run_sync(Base.metadata.create_all)
+    # Auto-create tables on startup (dev mode).
+    # In production, use Alembic migrations instead.
+    from app.db.session import engine
+    from app.db.base import Base
+    # Import all models so Base.metadata knows about them
+    import app.db.models  # noqa: F401
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Database tables ensured.")
     yield
     logger.info("Shutting down.")
 

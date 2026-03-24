@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "open": true,
+        "pgrep": true,
+        "pkill": true,
+        "docker compose": true
+    }
+}

@@ -1,23 +1,26 @@
 """
-Thin async wrapper around the OpenAI API.
+Thin async wrapper around the school LLMProxy.
 All LLM calls in the project go through this module, making it easy
 to swap providers later.
 """
+import asyncio
 import json
-from openai import AsyncOpenAI
+import re
+from llmproxy import LLMProxy
 from app.core.config import settings
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
 
-_client: AsyncOpenAI | None = None
+_proxy: LLMProxy | None = None
 
 
-def get_client() -> AsyncOpenAI:
-    global _client
-    if _client is None:
-        _client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    return _client
+def get_proxy() -> LLMProxy:
+    """Lazy-create a singleton LLMProxy instance."""
+    global _proxy
+    if _proxy is None:
+        _proxy = LLMProxy()
+    return _proxy
 
 
 async def chat_completion(
@@ -26,34 +29,43 @@ async def chat_completion(
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
-    response_format: str = "json_object",   # "json_object" | "text"
+    response_format: str = "json_object",   # kept for interface compat
 ) -> str:
     """
-    Call the chat API and return the raw string content.
-    Raises on API error.
+    Call the LLM via school proxy and return the raw string content.
+    Raises RuntimeError on API error.
     """
-    client = get_client()
+    proxy = get_proxy()
     model = model or settings.OPENAI_MODEL
     temperature = temperature if temperature is not None else settings.LLM_TEMPERATURE
-    max_tokens = max_tokens or settings.LLM_MAX_TOKENS
-
-    kwargs: dict = dict(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-    if response_format == "json_object":
-        kwargs["response_format"] = {"type": "json_object"}
 
     logger.debug("LLM call | model=%s temperature=%s", model, temperature)
-    response = await client.chat.completions.create(**kwargs)
-    content = response.choices[0].message.content or ""
+
+    # llmproxy is synchronous (requests) — run in thread pool
+    result = await asyncio.to_thread(
+        proxy.generate,
+        model=model,
+        system=system_prompt,
+        query=user_prompt,
+        temperature=temperature,
+        session_id="reading-companion",
+        rag_usage=False,
+    )
+
+    if "error" in result:
+        raise RuntimeError(f"LLMProxy error: {result['error']}")
+
+    content = result.get("result", "")
     logger.debug("LLM response length: %d chars", len(content))
     return content
+
+
+def _extract_json(text: str) -> str:
+    """Extract JSON from text that might be wrapped in markdown code blocks."""
+    m = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return text.strip()
 
 
 async def chat_completion_json(
@@ -64,4 +76,5 @@ async def chat_completion_json(
     """Call the API and parse the response as JSON dict."""
     raw = await chat_completion(system_prompt, user_prompt,
                                 response_format="json_object", **kwargs)
-    return json.loads(raw)
+    cleaned = _extract_json(raw)
+    return json.loads(cleaned)

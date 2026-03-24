@@ -11,8 +11,9 @@ alembic>=1.13.0
 pydantic>=2.7.0
 pydantic-settings>=2.2.0
 
-# LLM
-openai>=1.30.0
+# LLM (school proxy)
+requests>=2.31.0
+python-dotenv>=1.0.0
 
 # PDF parsing
 pdfplumber>=0.11.0
