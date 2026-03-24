@@ -129,6 +129,11 @@ class ReadingAgent:
 
         logger.info("Retell scored %.1f for session %s chunk %d",
                     feedback["score"], session_id, chunk.chunk_index)
+
+        # Remap LLM field "pass" → "passed" to match Pydantic response model
+        if "pass" in feedback and "passed" not in feedback:
+            feedback["passed"] = feedback.pop("pass")
+
         return feedback
 
     # ── Tool 3 — evaluate quick-check answers ──────────────────────────────
@@ -157,6 +162,10 @@ class ReadingAgent:
         if result["pass"]:
             await self.memory_svc.unlock_next_chunk(session_id)
             logger.info("Chunk %d unlocked for session %s", chunk.chunk_index + 1, session_id)
+
+        # Remap LLM field "pass" → "passed" to match Pydantic response model
+        if "pass" in result and "passed" not in result:
+            result["passed"] = result.pop("pass")
 
         return result
 

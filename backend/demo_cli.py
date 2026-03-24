@@ -200,13 +200,39 @@ def submit_quick_check():
     if not sid:
         print("\nMissing session_id.\n")
         return
-    try:
-        payload = prompt_json({
-            "answers": [{"question_id": 1, "answer": "example answer"}]
-        })
-    except json.JSONDecodeError:
-        print("\nBad JSON.\n")
-        return
+
+    # Fetch questions from the current chunk
+    print("\nFetching questions for current chunk...")
+    q_status, q_resp = http_request("GET", f"/sessions/{sid}/current")
+    questions = []
+    if isinstance(q_resp, dict):
+        questions = q_resp.get("quick_check_questions", [])
+
+    if not questions:
+        print("\nNo questions found. Falling back to manual JSON input.")
+        try:
+            payload = prompt_json({
+                "answers": [{"question_id": "q1", "answer": "example answer"}]
+            })
+        except json.JSONDecodeError:
+            print("\nBad JSON.\n")
+            return
+    else:
+        print(f"\n  {len(questions)} question(s) found:\n")
+        answers = []
+        for i, q in enumerate(questions, 1):
+            qid = q.get("id", f"q{i}")
+            qtype = q.get("question_type", "")
+            qtext = q.get("question", "")
+            print(f"  Q{i} [{qtype}]: {qtext}")
+            ans = input(f"  Your answer: ").strip()
+            if not ans:
+                ans = "(skipped)"
+            answers.append({"question_id": qid, "answer": ans})
+            print()
+        payload = {"answers": answers}
+        print("Submitting answers...")
+
     status, resp = http_request("POST", f"/sessions/{sid}/quick-check", json_body=payload)
     print_result(status, resp)
 
