@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .DS_Store
 node_modules/
+backend/chroma_db/
 
 backend/.env.example
 *.pdf
