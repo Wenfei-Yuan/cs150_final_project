@@ -6,6 +6,7 @@ to swap providers later.
 import asyncio
 import json
 import re
+import uuid
 from llmproxy import LLMProxy
 from app.core.config import settings
 from app.core.logger import get_logger
@@ -48,7 +49,8 @@ async def chat_completion(
         system=system_prompt,
         query=user_prompt,
         temperature=temperature,
-        session_id="reading-companion",
+        session_id=f"rc-{uuid.uuid4().hex}",
+        lastk=0,
         rag_usage=False,
     )
 
@@ -56,6 +58,9 @@ async def chat_completion(
         raise RuntimeError(f"LLMProxy error: {result['error']}")
 
     content = result.get("result", "")
+    if not content:
+        logger.warning("LLMProxy returned empty content. Full response: %s", result)
+        raise RuntimeError("LLMProxy returned empty content")
     logger.debug("LLM response length: %d chars", len(content))
     return content
 
@@ -77,4 +82,6 @@ async def chat_completion_json(
     raw = await chat_completion(system_prompt, user_prompt,
                                 response_format="json_object", **kwargs)
     cleaned = _extract_json(raw)
+    if not cleaned:
+        raise RuntimeError("LLM returned an empty response")
     return json.loads(cleaned)
