@@ -110,6 +110,16 @@ async def advance_next(
     return await agent.next_chunk(session_id)
 
 
+# ── Skip chunk ─────────────────────────────────────────────────────────────────
+
+@router.post("/{session_id}/skip", summary="Force-advance to the next chunk (dev/skip)")
+async def skip_chunk(
+    session_id: str,
+    agent: ReadingAgent = Depends(_agent),
+):
+    return await agent.skip_chunk(session_id)
+
+
 # ── Progress ───────────────────────────────────────────────────────────────────
 
 @router.get("/{session_id}/progress", response_model=ProgressResponse,

@@ -38,6 +38,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://reading_user:reading_pass@db:5432/reading_companion
       - REDIS_URL=redis://redis:6379/0
     volumes:
+      - .:/app
       - ./uploads:/app/uploads
       - ./chroma_db:/app/chroma_db
     depends_on:

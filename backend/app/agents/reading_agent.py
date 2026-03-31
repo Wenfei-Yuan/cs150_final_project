@@ -181,7 +181,19 @@ class ReadingAgent:
             "status": session.status,
         }
 
-    # ── Tool 5 — get progress ──────────────────────────────────────────────
+    # ── Tool 5 — skip chunk ────────────────────────────────────────────────
+
+    async def skip_chunk(self, session_id: str) -> dict:
+        """Force-advance to the next chunk regardless of lock state."""
+        session = await self.memory_svc.force_advance_chunk(session_id)
+        return {
+            "session_id": str(session.id),
+            "current_chunk_index": session.current_chunk_index,
+            "unlocked_chunk_index": session.unlocked_chunk_index,
+            "status": session.status,
+        }
+
+    # ── Tool 6 — get progress ──────────────────────────────────────────────
 
     async def get_progress(self, session_id: str) -> dict:
         session = await self.memory_svc.get_session(session_id)

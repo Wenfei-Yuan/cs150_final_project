@@ -1,7 +1,9 @@
 """
 Routes: /documents/upload  and  /documents/{id}
 """
-from fastapi import APIRouter, UploadFile, File, Depends, Query
+from fastapi import APIRouter, UploadFile, File, Depends, Query, HTTPException
+from fastapi.responses import FileResponse
+from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -28,6 +30,20 @@ async def upload_pdf(
     svc = DocumentService(db)
     result = await svc.upload_and_parse(file, user_id)
     return result
+
+
+_BACKEND_ROOT = Path(__file__).parent.parent.parent
+
+@router.get("/{document_id}/pdf", summary="Download the original PDF file")
+async def get_pdf(document_id: str, db: AsyncSession = Depends(get_db)):
+    svc = DocumentService(db)
+    doc = await svc.get_document(document_id)
+    path = Path(doc.file_path)
+    if not path.is_absolute():
+        path = _BACKEND_ROOT / path
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"PDF not found: {path}")
+    return FileResponse(path, media_type="application/pdf", filename=doc.filename)
 
 
 @router.get("/{document_id}", response_model=DocumentStatusResponse,

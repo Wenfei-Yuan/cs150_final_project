@@ -1,6 +1,44 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
+import { Document, Page, pdfjs } from 'react-pdf'
+import 'react-pdf/dist/Page/TextLayer.css'
+import 'react-pdf/dist/Page/AnnotationLayer.css'
 import { api, type ChunkPacket, type RetellResult, type QuickCheckResult } from '@/lib/api'
+
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).toString()
+
+function PdfViewer({ documentId }: { documentId: string }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [containerWidth, setContainerWidth] = useState<number>(0)
+  const [numPages, setNumPages] = useState<number>(0)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const observer = new ResizeObserver(([entry]) => {
+      setContainerWidth(entry.contentRect.width)
+    })
+    observer.observe(containerRef.current)
+    return () => observer.disconnect()
+  }, [])
+
+  return (
+    <div ref={containerRef} className="w-full">
+      <Document
+        file={api.getPdfUrl(documentId)}
+        onLoadSuccess={({ numPages }) => setNumPages(numPages)}
+        loading={<p className="text-xs text-muted-foreground px-4 py-6">Loading PDF…</p>}
+        error={<p className="text-xs text-destructive px-4 py-6">Failed to load PDF.</p>}
+      >
+        {Array.from({ length: numPages }, (_, i) => (
+          <Page key={i + 1} pageNumber={i + 1} width={containerWidth || undefined} className="mb-2" />
+        ))}
+      </Document>
+    </div>
+  )
+}
 
 type Stage = 'read' | 'retell' | 'quiz'
 const STAGE_ORDER: Stage[] = ['read', 'retell', 'quiz']
@@ -14,9 +52,10 @@ function Spinner() {
   )
 }
 
+
 function HomeIcon() {
   return (
-    <svg className="size-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <svg className="size-6" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.25">
       <path d="M3 9.5L10 3l7 6.5" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M5 8v8h4v-4h2v4h4V8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
@@ -79,6 +118,7 @@ export default function ReadPage() {
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const [quizResult, setQuizResult] = useState<QuickCheckResult | null>(null)
   const [quizLoading, setQuizLoading] = useState(false)
+  const [pdfOpen, setPdfOpen] = useState(false)
 
   useEffect(() => {
     if (sessionId) loadChunk()
@@ -143,6 +183,17 @@ export default function ReadPage() {
     }
   }
 
+  async function handleSkip() {
+    setLoading(true)
+    try {
+      await api.skipChunk(sessionId!)
+      await loadChunk()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not skip.')
+      setLoading(false)
+    }
+  }
+
   // ── Loading / error ───────────────────────────────────────────────────────────
 
   if (loading) {
@@ -197,6 +248,7 @@ export default function ReadPage() {
 
   const topBar = (
     <div className="flex items-center px-6 py-3 border-b border-border shrink-0">
+      {/* Left side — home + back, space-between */}
       <div className="flex items-center justify-between w-[20%]">
         <button
           onClick={() => navigate('/')}
@@ -208,26 +260,39 @@ export default function ReadPage() {
         {onSplitScreen && (
           <button
             onClick={() => setStage(STAGE_ORDER[STAGE_ORDER.indexOf(stage) - 1])}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            style={{ fontSize: '14px' }}
+            className="text-muted-foreground hover:text-foreground transition-colors"
           >
             ← Back
           </button>
         )}
       </div>
 
+      {/* Center — progress */}
       <div className="flex-1 flex justify-center">
         <Progress current={current} total={total} stage={stage} />
       </div>
 
-      <div className={`flex items-center w-[20%] ${onSplitScreen ? 'justify-start' : 'justify-end'}`}>
+      {/* Right side — next + skip, space-between */}
+      <div className="flex items-center justify-between w-[20%]">
         <button
           onClick={handleNavNext}
           disabled={nextDisabled}
-          className="flex items-center gap-2 text-xs font-medium text-foreground underline underline-offset-4 disabled:opacity-30 disabled:no-underline transition-opacity"
+          style={{ fontSize: '14px' }}
+          className="flex items-center gap-1 text-foreground disabled:opacity-30 transition-opacity"
         >
           {(retellLoading || quizLoading) && <Spinner />}
           Next →
         </button>
+        {current + 1 < total && (
+          <button
+            onClick={handleSkip}
+            style={{ fontSize: '14px' }}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+          >
+            Skip
+          </button>
+        )}
       </div>
     </div>
   )
@@ -239,7 +304,9 @@ export default function ReadPage() {
       <div className="min-h-screen bg-background flex flex-col">
         {topBar}
         <div className="max-w-2xl mx-auto w-full px-6 py-12 space-y-8">
-          <p className="text-base leading-relaxed text-foreground">{chunk.text}</p>
+          <p className="text-base leading-relaxed text-foreground" style={{ fontFamily: 'Verdana, sans-serif' }}>
+            {chunk.text}
+          </p>
 
           {chunk.annotated_summary.length > 0 && (
             <div className="border-t border-border pt-6 space-y-2">
@@ -274,13 +341,41 @@ export default function ReadPage() {
 
       <div className="flex flex-1 overflow-hidden">
 
-        {/* Left — chunk */}
-        <div className="w-1/2 border-r border-border overflow-y-auto px-8 py-10">
-          <p className="text-sm leading-relaxed text-foreground">{chunk.text}</p>
+        {/* 1st column — PDF */}
+        {pdfOpen && (
+          <div className="w-[40%] border-r border-border overflow-y-auto px-2 py-4">
+            <PdfViewer documentId={chunk.document_id} />
+          </div>
+        )}
+
+        {/* 2nd column — chunk text + position strip */}
+        <div className={`${pdfOpen ? 'w-[30%]' : 'w-1/2'} border-r border-border flex overflow-hidden`}>
+          {/* Position strip — click to toggle PDF */}
+          <button
+            onClick={() => setPdfOpen(o => !o)}
+            className="w-2 shrink-0 relative bg-muted/30 hover:bg-muted/60 transition-colors"
+            title={pdfOpen ? 'Hide PDF' : 'Show PDF'}
+          >
+            <div
+              className="absolute left-0 right-0 bg-foreground/40 rounded-sm"
+              style={{
+                top: `${(current / total) * 100}%`,
+                height: `${(1 / total) * 100}%`,
+                minHeight: '4px',
+              }}
+            />
+          </button>
+
+          {/* Text */}
+          <div className="flex-1 overflow-y-auto px-8 py-10">
+            <p className="text-foreground" style={{ fontFamily: 'Verdana, sans-serif', fontSize: '18px', lineHeight: '27px' }}>
+              {chunk.text}
+            </p>
+          </div>
         </div>
 
-        {/* Right — interaction */}
-        <div className="w-1/2 overflow-y-auto px-8 py-10">
+        {/* 3rd column — interaction */}
+        <div className={`${pdfOpen ? 'w-[30%]' : 'w-1/2'} overflow-y-auto px-8 py-10`}>
 
           {/* ── Retell ── */}
           {stage === 'retell' && (
@@ -381,6 +476,8 @@ export default function ReadPage() {
           )}
 
         </div>
+
+
       </div>
     </div>
   )

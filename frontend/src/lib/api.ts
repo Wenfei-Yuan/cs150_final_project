@@ -68,4 +68,9 @@ export const api = {
     request<{ current_chunk_index: number; total_chunks: number }>(
       'POST', `/sessions/${sessionId}/next`
     ),
+  skipChunk: (sessionId: string) =>
+    request<{ current_chunk_index: number; total_chunks: number }>(
+      'POST', `/sessions/${sessionId}/skip`
+    ),
+  getPdfUrl: (documentId: string) => `${BASE_URL}/documents/${documentId}/pdf`,
 }
