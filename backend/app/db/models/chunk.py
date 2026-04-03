@@ -19,6 +19,10 @@ class Chunk(Base):
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     section: Mapped[str | None] = mapped_column(String(256))
 
+    # Section-based chunking fields
+    section_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    section_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # Linked-list navigation
     prev_chunk_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     next_chunk_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)

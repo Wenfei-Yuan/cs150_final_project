@@ -51,6 +51,8 @@ class ChunkPacketResponse(BaseModel):
     quick_check_questions: list[QuickCheckQuestion]
     progress: ProgressInfo
     can_continue: bool = False
+    mode: str | None = None
+    retell_required: bool = False
 
 
 # ── Retell ────────────────────────────────────────────────────────────────────
@@ -99,3 +101,5 @@ class ProgressResponse(BaseModel):
     unlocked_chunk_index: int
     total_chunks: int
     completed_interactions: int
+    mode: str | None = None
+    status: str | None = None

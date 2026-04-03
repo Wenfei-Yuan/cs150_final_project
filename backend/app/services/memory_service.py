@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from app.db.models.reading_session import ReadingSession
 from app.db.models.interaction import Interaction
+from app.db.models.document import Document
 from app.db.models.user_profile import UserProfileMemory
-from app.core.exceptions import SessionNotFoundError
+from app.core.exceptions import SessionNotFoundError, DocumentNotFoundError
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -51,6 +52,15 @@ class MemoryService:
         if not session:
             raise SessionNotFoundError(session_id)
         return session
+
+    async def get_document(self, document_id: str) -> Document:
+        result = await self.db.execute(
+            select(Document).where(Document.id == uuid.UUID(document_id))
+        )
+        doc = result.scalar_one_or_none()
+        if not doc:
+            raise DocumentNotFoundError(document_id)
+        return doc
 
     async def unlock_next_chunk(self, session_id: str) -> ReadingSession:
         session = await self.get_session(session_id)
