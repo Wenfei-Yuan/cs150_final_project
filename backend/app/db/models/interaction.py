@@ -3,16 +3,15 @@ Interaction ORM model — records every user-system exchange per chunk.
 """
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, Float, Boolean, ForeignKey, DateTime, JSON, func
+from sqlalchemy import String, Text, Float, Boolean, ForeignKey, DateTime, JSON, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
 
 
 class Interaction(Base):
     __tablename__ = "interactions"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
     session_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reading_sessions.id", ondelete="CASCADE"),
                                                    nullable=False, index=True)
     chunk_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chunks.id", ondelete="CASCADE"),

@@ -3,16 +3,15 @@ ReadingSession ORM model.
 """
 import uuid
 from datetime import datetime
-from sqlalchemy import String, Text, Integer, ForeignKey, DateTime, JSON, func
+from sqlalchemy import String, Text, Integer, ForeignKey, DateTime, JSON, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
 
 
 class ReadingSession(Base):
     __tablename__ = "reading_sessions"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"),
                                                     nullable=False)

@@ -2,16 +2,15 @@
 Chunk ORM model.
 """
 import uuid
-from sqlalchemy import String, Text, Integer, ForeignKey, JSON
+from sqlalchemy import String, Text, Integer, ForeignKey, JSON, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import UUID
 from app.db.base import Base
 
 
 class Chunk(Base):
     __tablename__ = "chunks"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"),
                                                     nullable=False, index=True)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -24,8 +23,8 @@ class Chunk(Base):
     section_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Linked-list navigation
-    prev_chunk_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    next_chunk_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    prev_chunk_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
+    next_chunk_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True)
 
     # Cached LLM outputs (avoid re-calling the API)
     summary_cached: Mapped[str | None] = mapped_column(Text)
