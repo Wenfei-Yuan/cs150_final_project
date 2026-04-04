@@ -3,8 +3,9 @@ Paragraph-aware chunker for academic PDFs.
 
 Strategy:
   - Prefer splitting on section boundaries.
-  - Within a section, group up to MAX_PARAGRAPHS paragraphs OR until
-    cumulative token count exceeds MAX_TOKENS — whichever comes first.
+    - Default to one paragraph per chunk.
+    - Only merge adjacent very short paragraphs when they clearly belong together.
+    - Split a single paragraph only when it is too long.
   - Never exceed the hard token ceiling.
 """
 from __future__ import annotations
@@ -27,9 +28,11 @@ class Chunker:
         self,
         max_tokens: int = settings.CHUNK_MAX_TOKENS,
         max_paragraphs: int = settings.CHUNK_MAX_PARAGRAPHS,
+        short_paragraph_tokens: int = 12,
     ):
         self.max_tokens = max_tokens
         self.max_paragraphs = max_paragraphs
+        self.short_paragraph_tokens = short_paragraph_tokens
 
     def chunk_sections(self, sections: list[dict]) -> list[dict]:
         """
@@ -64,37 +67,65 @@ class Chunker:
         section: str = "",
     ) -> list[dict]:
         """
-        Group paragraphs into chunks respecting token and paragraph limits.
+        Default to one paragraph per chunk.
+        Only merge consecutive very short paragraphs as a fallback.
         """
-        chunks: list[dict] = []
-        current: list[str] = []
-        current_tokens = 0
+        return self._chunk_paragraph_sequence(paragraphs, section=section, allow_short_merge=True)
 
-        for para in paragraphs:
+    def _chunk_paragraph_sequence(
+        self,
+        paragraphs: list[str],
+        section: str = "",
+        allow_short_merge: bool = True,
+    ) -> list[dict]:
+        chunks: list[dict] = []
+        index = 0
+
+        while index < len(paragraphs):
+            para = paragraphs[index]
+            if not para.strip():
+                index += 1
+                continue
+
             p_tokens = _estimate_tokens(para)
 
-            # Flush if adding this paragraph would exceed limits
-            flush = (
-                current and (
-                    current_tokens + p_tokens > self.max_tokens
-                    or len(current) >= self.max_paragraphs
-                )
-            )
-            if flush:
-                chunks.append(self._make_chunk(current, section))
-                current = []
-                current_tokens = 0
-
-            # If a single paragraph is gigantic, split it by sentences
             if p_tokens > self.max_tokens:
                 for sub in self._split_long_paragraph(para):
                     chunks.append(self._make_chunk([sub], section))
-            else:
-                current.append(para)
-                current_tokens += p_tokens
 
-        if current:
-            chunks.append(self._make_chunk(current, section))
+                index += 1
+                continue
+
+            if allow_short_merge and self._is_short_paragraph(p_tokens):
+                merged_paragraphs = [para]
+                merged_tokens = p_tokens
+                lookahead = index + 1
+
+                while (
+                    lookahead < len(paragraphs)
+                    and len(merged_paragraphs) < self.max_paragraphs
+                ):
+                    next_para = paragraphs[lookahead]
+                    if not next_para.strip():
+                        lookahead += 1
+                        continue
+
+                    next_tokens = _estimate_tokens(next_para)
+                    if not self._is_short_paragraph(next_tokens):
+                        break
+                    if merged_tokens + next_tokens > self.max_tokens:
+                        break
+
+                    merged_paragraphs.append(next_para)
+                    merged_tokens += next_tokens
+                    lookahead += 1
+
+                chunks.append(self._make_chunk(merged_paragraphs, section))
+                index += len(merged_paragraphs)
+                continue
+
+            chunks.append(self._make_chunk([para], section))
+            index += 1
 
         return chunks
 
@@ -116,16 +147,22 @@ class Chunker:
 
             group_title = group.get("title") or f"{section} part {index + 1}".strip()
             group_rationale = group.get("rationale", "")
-            group_text = "\n\n".join(paragraphs)
+            preserve_group = bool(group.get("preserve_group"))
 
-            if _estimate_tokens(group_text) <= self.max_tokens:
-                chunk = self._make_chunk(paragraphs, section)
-                chunk["semantic_group_title"] = group_title
-                chunk["semantic_group_rationale"] = group_rationale
-                chunks.append(chunk)
-                continue
+            if preserve_group:
+                group_text = "\n\n".join(paragraphs)
+                if _estimate_tokens(group_text) <= self.max_tokens:
+                    chunk = self._make_chunk(paragraphs, section)
+                    chunk["semantic_group_title"] = group_title
+                    chunk["semantic_group_rationale"] = group_rationale
+                    chunks.append(chunk)
+                    continue
 
-            for sub_chunk in self.chunk_paragraphs(paragraphs, section=section):
+            for sub_chunk in self._chunk_paragraph_sequence(
+                paragraphs,
+                section=section,
+                allow_short_merge=not preserve_group,
+            ):
                 sub_chunk["semantic_group_title"] = group_title
                 sub_chunk["semantic_group_rationale"] = group_rationale
                 chunks.append(sub_chunk)
@@ -143,6 +180,9 @@ class Chunker:
             "section": section,
             "token_count": _estimate_tokens(text),
         }
+
+    def _is_short_paragraph(self, token_count: int) -> bool:
+        return token_count <= self.short_paragraph_tokens
 
     def _split_long_paragraph(self, para: str) -> list[str]:
         """Split a very long paragraph at sentence boundaries."""

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # ── LLM ───────────────────────────────────────────────────────────────
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "4o-mini"
+    OPENAI_MODEL: str = "gpt-5-mini"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 1024

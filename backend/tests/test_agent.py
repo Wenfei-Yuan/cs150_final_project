@@ -272,6 +272,112 @@ async def test_generate_mind_map_preserves_actual_section_indices(mock_chat_comp
 
 
 @pytest.mark.asyncio
+@patch("app.agents.reading_agent.pdf_parser")
+async def test_get_mind_map_recovers_explicit_subsection_titles(mock_pdf_parser):
+    """Mind map should use explicit subsection headings from the PDF when available."""
+    from app.agents.reading_agent import ReadingAgent
+
+    db = AsyncMock()
+    agent = ReadingAgent(db)
+
+    session = MagicMock()
+    session.document_id = uuid4()
+    document = MagicMock()
+    document.file_path = "paper.pdf"
+
+    agent.memory_svc.get_session = AsyncMock(return_value=session)
+    agent.memory_svc.get_document = AsyncMock(return_value=document)
+    agent._get_all_chunks_meta = AsyncMock(return_value=[
+        {
+            "chunk_index": 0,
+            "text": "This abstract summarizes the study.",
+            "section": "Abstract",
+            "section_type": "abstract",
+            "section_index": 0,
+        },
+        {
+            "chunk_index": 1,
+            "text": "Prior models are reviewed in detail.",
+            "section": "Related Work",
+            "section_type": "related_work",
+            "section_index": 1,
+        },
+        {
+            "chunk_index": 2,
+            "text": "Retrieval methods are compared here.",
+            "section": "Related Work",
+            "section_type": "related_work",
+            "section_index": 1,
+        },
+        {
+            "chunk_index": 3,
+            "text": "Interface studies are summarized here.",
+            "section": "Related Work",
+            "section_type": "related_work",
+            "section_index": 1,
+        },
+        {
+            "chunk_index": 4,
+            "text": "Accessibility work is summarized here.",
+            "section": "Related Work",
+            "section_type": "related_work",
+            "section_index": 1,
+        },
+    ])
+    agent._get_sections_meta = AsyncMock(return_value=[
+        {
+            "section_type": "abstract",
+            "section_index": 0,
+            "title": "Abstract",
+            "chunk_indices": [0],
+        },
+        {
+            "section_type": "related_work",
+            "section_index": 1,
+            "title": "Related Work",
+            "chunk_indices": [1, 2, 3, 4],
+        },
+    ])
+    agent.section_svc.generate_mind_map = AsyncMock(return_value={"document_id": "doc-1", "sections": []})
+
+    mock_pdf_parser.extract.return_value = {
+        "sections": [
+            {
+                "heading": "Abstract",
+                "paragraphs": [
+                    "This abstract summarizes the study.",
+                ],
+            },
+            {
+                "heading": "Related Work",
+                "paragraphs": [
+                    "2.1 Prior Models",
+                    "Prior models are reviewed in detail.",
+                    "2.2 Retrieval Methods",
+                    "Retrieval methods are compared here.",
+                    "2.3 Interface Studies",
+                    "Interface studies are summarized here.",
+                    "2.4 Accessibility Research",
+                    "Accessibility work is summarized here.",
+                ],
+            },
+        ],
+    }
+
+    await agent.get_mind_map(str(uuid4()))
+
+    explicit_subsections = agent.section_svc.generate_mind_map.await_args.kwargs["explicit_subsections"]
+    assert explicit_subsections.get(0) in (None, [])
+    assert [node["brief_summary"] for node in explicit_subsections[1]] == [
+        "2.1 Prior Models",
+        "2.2 Retrieval Methods",
+        "2.3 Interface Studies",
+        "2.4 Accessibility Research",
+    ]
+    assert [node["chunk_index"] for node in explicit_subsections[1]] == [1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
 async def test_submit_setup_answers_returns_normalized_mode_choices():
     """Setup response should preserve typed mode choices for the CLI reselection flow."""
     from app.agents.reading_agent import ReadingAgent

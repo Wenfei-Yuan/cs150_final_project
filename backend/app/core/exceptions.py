@@ -16,6 +16,12 @@ class SessionNotFoundError(HTTPException):
                          detail=f"Session '{session_id}' not found.")
 
 
+class ChunkNotFoundError(HTTPException):
+    def __init__(self, document_id: str, chunk_index: int):
+        super().__init__(status_code=status.HTTP_404_NOT_FOUND,
+                         detail=f"Chunk {chunk_index} not found for document '{document_id}'.")
+
+
 class ChunkLockedError(HTTPException):
     def __init__(self, chunk_index: int):
         super().__init__(status_code=status.HTTP_403_FORBIDDEN,

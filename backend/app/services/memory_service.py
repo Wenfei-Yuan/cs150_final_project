@@ -29,6 +29,17 @@ class MemoryService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    async def _get_session_for_update(self, session_id: str) -> ReadingSession:
+        result = await self.db.execute(
+            select(ReadingSession)
+            .where(ReadingSession.id == uuid.UUID(session_id))
+            .with_for_update()
+        )
+        session = result.scalar_one_or_none()
+        if not session:
+            raise SessionNotFoundError(session_id)
+        return session
+
     # ── Session (short/mid-term) ───────────────────────────────────────────
 
     async def create_session(
@@ -64,7 +75,7 @@ class MemoryService:
         return doc
 
     async def unlock_next_chunk(self, session_id: str) -> ReadingSession:
-        session = await self.get_session(session_id)
+        session = await self._get_session_for_update(session_id)
         if session.unlocked_chunk_index < session.total_chunks - 1:
             session.unlocked_chunk_index += 1
         if session.unlocked_chunk_index >= session.total_chunks - 1:
@@ -75,7 +86,7 @@ class MemoryService:
 
     async def force_advance_chunk(self, session_id: str) -> ReadingSession:
         """Force-advance regardless of lock state (skip/dev use)."""
-        session = await self.get_session(session_id)
+        session = await self._get_session_for_update(session_id)
         if session.current_chunk_index < session.total_chunks - 1:
             session.current_chunk_index += 1
             session.unlocked_chunk_index = max(session.unlocked_chunk_index, session.current_chunk_index)
@@ -84,9 +95,25 @@ class MemoryService:
         return session
 
     async def advance_current_chunk(self, session_id: str) -> ReadingSession:
-        session = await self.get_session(session_id)
+        session = await self._get_session_for_update(session_id)
         if session.current_chunk_index < session.unlocked_chunk_index:
             session.current_chunk_index += 1
+        await self.db.commit()
+        await self.db.refresh(session)
+        return session
+
+    async def mark_chunk_for_retry_and_unlock(
+        self, session_id: str, chunk_index: int
+    ) -> ReadingSession:
+        session = await self._get_session_for_update(session_id)
+        marked = list(session.marked_for_retry or [])
+        if chunk_index not in marked:
+            marked.append(chunk_index)
+            session.marked_for_retry = marked
+        if session.unlocked_chunk_index < session.total_chunks - 1:
+            session.unlocked_chunk_index += 1
+        if session.unlocked_chunk_index >= session.total_chunks - 1:
+            session.status = "completed"
         await self.db.commit()
         await self.db.refresh(session)
         return session

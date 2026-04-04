@@ -31,10 +31,22 @@ _SECTION_ID_SYSTEM = (
 
 _SECTION_ID_USER = """\
 Below is an academic paper split into numbered paragraphs.
-Identify the major sections of this paper. Each section should correspond to a
-top-level heading like Abstract, Introduction, Related Work, Methods, Results, Discussion, Conclusion, etc.
-Use only top-level paper structure. Do not invent nested subsections here.
-If a paragraph is clearly a figure/table caption block, isolate it as a "figures_tables" section.
+Each paragraph is annotated with its structural type:
+  [H:top] = top-level section heading (e.g. "Abstract", "1 Introduction", "4 EVALUATION")
+  [H:sub] = subsection heading     (e.g. "4.2 Findings", "2.1 Dataset", "3.1.1 Setup")
+  [C]     = regular content paragraph
+
+Task: Identify the major top-level sections for a paper mind map.
+
+Critical rules:
+- Use ONLY [H:top] paragraphs as top-level section boundaries.
+- Do NOT use [H:sub] paragraphs as top-level section starts.
+- The section range STARTS at the [H:top] heading paragraph index (include it).
+- The section range ENDS at the paragraph just before the next [H:top] heading.
+- A section must contain at least one [C] content paragraph — never return a
+  section whose range covers only a heading line with no following content.
+- If a paragraph is clearly a figure/table caption block, isolate it as a
+  "figures_tables" section.
 
 Paragraphs:
 {paragraphs_text}
@@ -61,8 +73,11 @@ Return JSON:
 
 _SEMANTIC_SUBDIVISION_SYSTEM = (
         "You are organizing a single academic-paper section into meaningful child chunks. "
+    "Prefer actual subsection headings as the primary chunk boundaries. "
         "Keep the original paragraph order, group adjacent paragraphs that belong to the same idea, "
-        "and create boundaries only when the topic or rhetorical function clearly changes. "
+    "and create boundaries only when the topic or rhetorical function clearly changes. "
+    "If subsection headings exist, make each subsection its own child chunk by default. "
+    "Only split a subsection further when its content is too long. "
         "Respond ONLY with valid JSON."
 )
 
@@ -77,10 +92,15 @@ Paragraphs in this section:
 
 Divide this section into ordered child chunks.
 Rules:
+- If explicit subsection headings are present, use them as the default chunk boundaries.
+- Each subsection should be one child chunk by default.
+- Only split a subsection further if the subsection content is very long or covers multiple clearly distinct points.
 - Keep paragraphs contiguous and in order.
 - Cover the entire section from the first paragraph to the last paragraph.
-- Make a new child chunk only when the idea, experiment step, result focus, or rhetorical role clearly changes.
-- If the whole section is one coherent idea, return a single child chunk.
+- If no subsection headings are present, group by meaning.
+- Merge adjacent paragraphs only if they are both very short and clearly describe the same single point.
+- Split one paragraph into multiple child chunks only if it is very long or clearly contains multiple distinct points.
+- Make a new child chunk when the idea, experiment step, result focus, or rhetorical role clearly changes.
 
 For each child chunk, provide:
 - title: a short label for that child chunk
@@ -122,7 +142,14 @@ For each section, provide:
 - section_type: the type (e.g., abstract, introduction)
 - title: the section heading
 - summary: a 1-2 sentence summary of the entire section
-- sub_chunk_summaries: a list of brief (1 sentence each) summaries for each chunk within the section
+- sub_chunk_summaries: a list of very short child-node labels for each chunk within the section
+
+Rules for sub_chunk_summaries:
+- use short phrases, not full sentences
+- aim for 2-6 words each
+- prefer noun phrases or topic labels
+- no ending period
+- keep them concise enough to fit as mind-map child labels
 
 Return JSON:
 {{
@@ -131,7 +158,7 @@ Return JSON:
       "section_type": "abstract",
       "title": "Abstract",
       "summary": "This paper investigates...",
-      "sub_chunk_summaries": ["First chunk summary...", "Second chunk summary..."]
+            "sub_chunk_summaries": ["Research goal", "Main findings"]
     }}
   ]
 }}
@@ -158,6 +185,7 @@ class SectionChunkingService:
             sections_meta = self._identify_sections_heuristic(paragraphs)
 
         sections_meta = self._normalize_sections(paragraphs, sections_meta)
+        sections_meta = self._merge_heading_only_sections(paragraphs, sections_meta)
         sections_meta = self._split_out_figure_table_sections(paragraphs, sections_meta)
 
         all_chunks = []
@@ -187,17 +215,25 @@ class SectionChunkingService:
 
     async def _identify_sections_llm(self, paragraphs: list[str]) -> list[dict]:
         """Use LLM to identify sections."""
-        # Build numbered paragraph list (truncate if too long)
+        from app.utils.pdf_parser import pdf_parser
+
+        # Annotate each paragraph with its structural type so the LLM can
+        # distinguish top-level headings from subsection headings and content.
         para_lines = []
         for i, para in enumerate(paragraphs):
-            # Truncate long paragraphs for the prompt
             text = para[:300] + "..." if len(para) > 300 else para
-            para_lines.append(f"[{i}] {text}")
+            stripped = para.strip()
+            if pdf_parser._looks_like_heading_line(stripped):
+                # Sub-level headings start with digit.digit (e.g. "4.2 Findings")
+                tag = "[H:sub]" if re.match(r"^\d+\.\d+", stripped) else "[H:top]"
+            else:
+                tag = "[C]"
+            para_lines.append(f"[{i}]{tag} {text}")
         paragraphs_text = "\n\n".join(para_lines)
 
         # Limit prompt size
-        if len(paragraphs_text) > 8000:
-            paragraphs_text = paragraphs_text[:8000] + "\n... (truncated)"
+        if len(paragraphs_text) > 16000:
+            paragraphs_text = paragraphs_text[:16000] + "\n... (truncated)"
 
         raw = await chat_completion_json(
             system_prompt=_SECTION_ID_SYSTEM,
@@ -212,7 +248,7 @@ class SectionChunkingService:
             sec["start_paragraph_index"] = max(0, min(sec["start_paragraph_index"], max_idx))
             sec["end_paragraph_index"] = max(sec["start_paragraph_index"], min(sec["end_paragraph_index"], max_idx))
 
-        return data["sections"]
+        return self._absorb_subsection_sections(data["sections"])
 
     async def _identify_semantic_groups_llm(
         self,
@@ -229,16 +265,22 @@ class SectionChunkingService:
                     "title": self._figure_table_title(para, i + 1),
                     "paragraphs": [para],
                     "rationale": "Separate figure/table caption block",
+                    "preserve_group": True,
                 }
                 for i, para in enumerate(paragraphs)
                 if para.strip()
             ]
+
+        subsection_groups = self._identify_subsection_groups(section_meta, paragraphs)
+        if subsection_groups:
+            return subsection_groups
 
         if len(paragraphs) <= 2:
             return [{
                 "title": section_meta.get("title") or "Section",
                 "paragraphs": paragraphs,
                 "rationale": "Short section",
+                "preserve_group": True,
             }]
 
         para_lines = []
@@ -355,12 +397,14 @@ class SectionChunkingService:
                     "title": f"{section_title} part {len(normalized) + 1}",
                     "paragraphs": paragraphs[cursor:start],
                     "rationale": "Preserved uncovered paragraphs from semantic split",
+                    "preserve_group": False,
                 })
 
             normalized.append({
                 "title": group.get("title") or f"{section_title} part {len(normalized) + 1}",
                 "paragraphs": paragraphs[start:end + 1],
                 "rationale": group.get("rationale", "Semantic boundary"),
+                "preserve_group": bool(group.get("preserve_group", False)),
             })
             cursor = end + 1
 
@@ -369,6 +413,7 @@ class SectionChunkingService:
                 "title": f"{section_title} part {len(normalized) + 1}",
                 "paragraphs": paragraphs[cursor:max_idx + 1],
                 "rationale": "Preserved trailing paragraphs from semantic split",
+                "preserve_group": False,
             })
 
         if not normalized:
@@ -376,9 +421,79 @@ class SectionChunkingService:
                 "title": section_title,
                 "paragraphs": paragraphs,
                 "rationale": "Section kept as one coherent group",
+                "preserve_group": True,
             }]
 
         return [group for group in normalized if group["paragraphs"]]
+
+    def _identify_subsection_groups(self, section_meta: dict, paragraphs: list[str]) -> list[dict]:
+        """Use explicit subsection headings as chunk boundaries when present."""
+        from app.utils.pdf_parser import pdf_parser
+
+        section_title = self._normalize_heading_text(section_meta.get("title") or "")
+        groups: list[dict] = []
+        current_title = ""
+        current_paragraphs: list[str] = []
+        saw_subheading = False
+
+        for para in paragraphs:
+            stripped = " ".join(para.strip().split())
+            if not stripped:
+                continue
+
+            if self._normalize_heading_text(stripped) == section_title:
+                continue
+
+            if self._is_subsection_heading(pdf_parser, stripped, section_title):
+                if current_title and current_paragraphs:
+                    groups.append({
+                        "title": current_title,
+                        "paragraphs": current_paragraphs,
+                        "rationale": "Grouped by explicit subsection heading",
+                        "preserve_group": True,
+                    })
+                elif current_paragraphs:
+                    groups.append({
+                        "title": section_meta.get("title") or "Section",
+                        "paragraphs": current_paragraphs,
+                        "rationale": "Content before first subsection heading",
+                        "preserve_group": True,
+                    })
+
+                current_title = stripped
+                current_paragraphs = []
+                saw_subheading = True
+                continue
+
+            current_paragraphs.append(para)
+
+        if current_paragraphs:
+            groups.append({
+                "title": current_title or (section_meta.get("title") or "Section"),
+                "paragraphs": current_paragraphs,
+                "rationale": (
+                    "Grouped by explicit subsection heading"
+                    if current_title else
+                    "Section content without subsection heading"
+                ),
+                "preserve_group": True,
+            })
+
+        return groups if saw_subheading else []
+
+    def _is_subsection_heading(self, pdf_parser, text: str, section_title: str) -> bool:
+        if not pdf_parser._looks_like_heading_line(text):
+            return False
+
+        normalized = self._normalize_heading_text(text)
+        if not normalized or normalized == section_title:
+            return False
+
+        return True
+
+    def _normalize_heading_text(self, text: str) -> str:
+        normalized = re.sub(r"^(?:\d+(?:\.\d+)*)\s+", "", text.strip().lower())
+        return " ".join(normalized.split())
 
     def _split_out_figure_table_sections(
         self,
@@ -454,9 +569,14 @@ class SectionChunkingService:
         return stripped
 
     def _identify_sections_heuristic(self, paragraphs: list[str]) -> list[dict]:
-        """Fallback: use existing PDFParser section detection logic."""
+        """Fallback: direct paragraph scan with correct index tracking.
+
+        Only top-level headings (e.g. "4 Evaluation") act as section
+        boundaries. Subsection headings (e.g. "4.2 Findings") are kept inside
+        their parent section's paragraph range so they are handled later by
+        _identify_subsection_groups as chunk boundaries.
+        """
         from app.utils.pdf_parser import pdf_parser
-        raw_sections = pdf_parser._identify_sections(paragraphs)
 
         SECTION_TYPE_MAP = {
             "abstract": "abstract",
@@ -477,33 +597,126 @@ class SectionChunkingService:
             "preamble": "abstract",
         }
 
-        result = []
-        current_para_idx = 0
-        for sec in raw_sections:
-            heading_lower = sec["heading"].lower()
-            sec_type = "other"
+        def _sec_type(heading: str) -> str:
+            heading_lower = heading.lower()
             for keyword, mapped_type in SECTION_TYPE_MAP.items():
                 if keyword in heading_lower:
-                    sec_type = mapped_type
-                    break
+                    return mapped_type
+            return "other"
 
-            n_paras = len(sec["paragraphs"])
-            # Find the actual paragraph indices
-            start_idx = current_para_idx
-            end_idx = current_para_idx + n_paras - 1
+        def _is_top_level_boundary(text: str) -> bool:
+            """Return True only for top-level headings, not X.Y subsections."""
+            if not pdf_parser._looks_like_heading_line(text):
+                return False
+            # Sub-level headings start with digit.digit (e.g. "4.2 Findings")
+            return not re.match(r"^\d+\.\d+", text.strip())
 
+        result = []
+        current_heading = "preamble"
+        section_start = 0
+
+        for i, para in enumerate(paragraphs):
+            stripped = para.strip()
+            if not stripped:
+                continue
+            if _is_top_level_boundary(stripped):
+                if i > section_start:
+                    result.append({
+                        "section_type": _sec_type(current_heading),
+                        "title": current_heading,
+                        "start_paragraph_index": section_start,
+                        "end_paragraph_index": i - 1,
+                    })
+                current_heading = stripped
+                section_start = i  # include the heading line in the section range
+
+        # Flush the last section
+        if section_start <= len(paragraphs) - 1:
             result.append({
-                "section_type": sec_type,
-                "title": sec["heading"],
-                "start_paragraph_index": start_idx,
-                "end_paragraph_index": max(start_idx, end_idx),
+                "section_type": _sec_type(current_heading),
+                "title": current_heading,
+                "start_paragraph_index": section_start,
+                "end_paragraph_index": len(paragraphs) - 1,
             })
-            current_para_idx += n_paras
+
+        return result
+
+    def _absorb_subsection_sections(self, sections: list[dict]) -> list[dict]:
+        """Merge any LLM-returned section whose title is a subsection (X.Y or X.Y.Z)
+        into the immediately preceding top-level section by extending its end index.
+
+        When result is empty (subsection before any top-level), the subsection is kept
+        as-is rather than silently discarded.
+        """
+        result: list[dict] = []
+        for sec in sections:
+            title = (sec.get("title") or "").strip()
+            if result and re.match(r"^\d+\.\d+", title):
+                # Extend the preceding section to include this subsection's range
+                result[-1]["end_paragraph_index"] = max(
+                    result[-1].get("end_paragraph_index", 0),
+                    sec.get("end_paragraph_index", 0),
+                )
+            else:
+                # Top-level section OR subsection with no preceding section → keep as-is
+                result.append(dict(sec))
+        return result
+
+    def _merge_heading_only_sections(
+        self, paragraphs: list[str], sections_meta: list[dict]
+    ) -> list[dict]:
+        """Absorb heading-only sections into the immediately following section.
+
+        When the LLM creates a section whose paragraph range covers only heading
+        lines (e.g. start=end=heading_idx), that section produces a useless
+        summary. Merging it forward causes the heading to appear at the start of
+        the next section's range, where _identify_subsection_groups already
+        handles it correctly.
+        """
+        from app.utils.pdf_parser import pdf_parser
+
+        def has_content(start: int, end: int) -> bool:
+            return any(
+                p.strip() and not pdf_parser._looks_like_heading_line(p.strip())
+                for p in paragraphs[start : end + 1]
+            )
+
+        # One forward pass; repeat until stable to handle consecutive heading-only sections
+        changed = True
+        result = list(sections_meta)
+        while changed:
+            changed = False
+            new_result: list[dict] = []
+            i = 0
+            while i < len(result):
+                sec = result[i]
+                start = sec["start_paragraph_index"]
+                end = sec["end_paragraph_index"]
+                if not has_content(start, end) and i + 1 < len(result):
+                    next_sec = result[i + 1]
+                    merged = {
+                        **sec,
+                        "end_paragraph_index": next_sec["end_paragraph_index"],
+                    }
+                    # Prefer the more-specific section type from the next section
+                    if next_sec["section_type"] != "other" and sec["section_type"] == "other":
+                        merged["section_type"] = next_sec["section_type"]
+                    new_result.append(merged)
+                    i += 2
+                    changed = True
+                else:
+                    new_result.append(sec)
+                    i += 1
+            result = new_result
 
         return result
 
     async def generate_mind_map(
-        self, document_id: str, sections_meta: list[dict], chunks: list[dict]
+        self,
+        document_id: str,
+        sections_meta: list[dict],
+        chunks: list[dict],
+        explicit_subsections: dict[int, list[dict]] | None = None,
     ) -> dict:
         """
         LLM call: mind_map_generation
@@ -511,8 +724,10 @@ class SectionChunkingService:
         """
         # Build sections text for the prompt
         sections_text_parts = []
-        for sec in sections_meta:
-            sec_idx = sec.get("section_index", sections_meta.index(sec))
+        for fallback_index, sec in enumerate(sections_meta):
+            sec_idx = sec.get("section_index")
+            if sec_idx is None:
+                sec_idx = fallback_index
             sec_chunks = [c for c in chunks if c.get("section_index") == sec_idx]
             chunk_texts = []
             for i, c in enumerate(sec_chunks):
@@ -525,8 +740,8 @@ class SectionChunkingService:
             )
 
         sections_text = "\n\n".join(sections_text_parts)
-        if len(sections_text) > 8000:
-            sections_text = sections_text[:8000] + "\n... (truncated)"
+        if len(sections_text) > 16000:
+            sections_text = sections_text[:16000] + "\n... (truncated)"
 
         try:
             raw = await chat_completion_json(
@@ -546,33 +761,75 @@ class SectionChunkingService:
                         "sub_chunk_summaries": [
                             f"Chunk {j}"
                             for j, c in enumerate(chunks)
-                            if c.get("section_index") == sec.get("section_index", sec_fb_idx)
+                            if c.get("section_index") == (
+                                sec.get("section_index")
+                                if sec.get("section_index") is not None
+                                else sec_fb_idx
+                            )
                         ],
                     }
                     for sec_fb_idx, sec in enumerate(sections_meta)
                 ]
             }
 
+        # Build title-keyed lookup so sections are matched by normalized title,
+        # not by position — prevents misalignment when the LLM omits sections
+        # or returns them in a slightly different order.
+        llm_section_map: dict[str, dict] = {}
+        for s in data.get("sections", []):
+            key = self._normalize_heading_text(s.get("title", ""))
+            if key and key not in llm_section_map:   # keep first occurrence on collision
+                llm_section_map[key] = s
+
         # Build final mind map with chunk indices
         mind_map_sections = []
         for i, sec in enumerate(sections_meta):
-            sec_idx = sec.get("section_index", i)
+            sec_idx = sec.get("section_index")
+            if sec_idx is None:
+                sec_idx = i
             sec_chunks = [c for c in chunks if c.get("section_index") == sec_idx]
             chunk_indices = [c["chunk_index"] for c in sec_chunks]
+            group_title_counts: dict[str, int] = {}
+            for chunk in sec_chunks:
+                group_title = (chunk.get("semantic_group_title") or "").strip()
+                if not group_title:
+                    continue
+                group_title_counts[group_title] = group_title_counts.get(group_title, 0) + 1
 
-            map_entry = data["sections"][i] if i < len(data["sections"]) else {
-                "summary": sec["title"],
-                "sub_chunk_summaries": [],
-            }
+            map_entry = (
+                llm_section_map.get(self._normalize_heading_text(sec["title"]))
+                or {"summary": sec["title"], "sub_chunk_summaries": []}
+            )
 
-            sub_chunks = []
-            for j, ci in enumerate(chunk_indices):
-                sub_summary = (
-                    map_entry["sub_chunk_summaries"][j]
-                    if j < len(map_entry.get("sub_chunk_summaries", []))
-                    else f"Chunk {ci}"
-                )
-                sub_chunks.append({"chunk_index": ci, "brief_summary": sub_summary})
+            explicit_nodes = (explicit_subsections or {}).get(sec_idx) or []
+            if explicit_nodes:
+                sub_chunks = [
+                    {
+                        "chunk_index": node["chunk_index"],
+                        "brief_summary": self._compact_sub_chunk_summary(
+                            node.get("brief_summary", ""),
+                            node["chunk_index"],
+                        ),
+                    }
+                    for node in explicit_nodes
+                ]
+            else:
+                sub_chunks = []
+                for j, ci in enumerate(chunk_indices):
+                    chunk = sec_chunks[j]
+                    group_title = (chunk.get("semantic_group_title") or "").strip()
+                    if group_title and group_title_counts.get(group_title, 0) == 1:
+                        sub_summary = group_title
+                    else:
+                        sub_summary = (
+                            map_entry["sub_chunk_summaries"][j]
+                            if j < len(map_entry.get("sub_chunk_summaries", []))
+                            else group_title or f"Chunk {ci}"
+                        )
+                    sub_chunks.append({
+                        "chunk_index": ci,
+                        "brief_summary": self._compact_sub_chunk_summary(sub_summary, ci),
+                    })
 
             mind_map_sections.append({
                 "section_index": sec_idx,
@@ -584,6 +841,35 @@ class SectionChunkingService:
             })
 
         return {"document_id": document_id, "sections": mind_map_sections}
+
+    def _compact_sub_chunk_summary(self, summary: str, chunk_index: int) -> str:
+        """Normalize child-node labels so they stay short and phrase-like."""
+        text = " ".join((summary or "").strip().split())
+        if not text:
+            return f"Chunk {chunk_index}"
+
+        if re.match(r"^\d+(?:\.\d+)+\s+\S", text):
+            words = text.split()
+            if len(words) > 6:
+                text = " ".join(words[:6])
+            if len(text) > 48:
+                text = text[:45].rstrip() + "..."
+            return text or f"Chunk {chunk_index}"
+
+        text = text.rstrip(".?!;:，。！？；：")
+
+        sentence_break = re.search(r"[.?!;:，。！？；：]", text)
+        if sentence_break:
+            text = text[:sentence_break.start()].strip()
+
+        words = text.split()
+        if len(words) > 6:
+            text = " ".join(words[:6])
+
+        if len(text) > 48:
+            text = text[:45].rstrip() + "..."
+
+        return text or f"Chunk {chunk_index}"
 
     async def get_chunks_by_section(self, document_id: str, section_index: int) -> list[Chunk]:
         """Get all chunks for a specific section."""

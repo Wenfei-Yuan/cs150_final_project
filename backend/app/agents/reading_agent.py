@@ -332,6 +332,164 @@ class ReadingAgent:
 
         return normalized_chunks
 
+    async def _recover_explicit_subsections(
+        self,
+        session,
+        sections_meta: list[dict],
+        chunks_meta: list[dict],
+    ) -> dict[int, list[dict]]:
+        """Recover subsection titles from the stored PDF for mind-map display."""
+        try:
+            document = await self.memory_svc.get_document(str(session.document_id))
+        except Exception:
+            return {}
+
+        if not getattr(document, "file_path", None):
+            return {}
+
+        try:
+            parsed = pdf_parser.extract(document.file_path)
+        except Exception:
+            return {}
+
+        parsed_sections = [
+            section
+            for section in parsed.get("sections", [])
+            if (section.get("heading") or "").strip()
+        ]
+        if not parsed_sections:
+            return {}
+
+        explicit_subsections: dict[int, list[dict]] = {}
+        parsed_cursor = 0
+
+        for section in sections_meta:
+            sec_idx = section.get("section_index")
+            if sec_idx is None:
+                continue
+
+            section_chunks = [
+                chunk
+                for chunk in chunks_meta
+                if chunk.get("section_index") == sec_idx
+            ]
+            if not section_chunks:
+                continue
+
+            matched_section_index = self._match_parsed_section_index(
+                parsed_sections,
+                parsed_cursor,
+                section.get("title"),
+            )
+            if matched_section_index is None:
+                continue
+
+            parsed_cursor = matched_section_index + 1
+            parsed_section = parsed_sections[matched_section_index]
+            subsection_groups = self.section_svc._identify_subsection_groups(
+                section,
+                parsed_section.get("paragraphs", []),
+            )
+            if not subsection_groups:
+                continue
+
+            subsection_nodes = self._map_subsection_groups_to_chunks(
+                section_chunks,
+                subsection_groups,
+            )
+            if subsection_nodes:
+                explicit_subsections[sec_idx] = subsection_nodes
+
+        return explicit_subsections
+
+    def _match_parsed_section_index(
+        self,
+        parsed_sections: list[dict],
+        start_index: int,
+        section_title: str | None,
+    ) -> int | None:
+        normalized_title = self.section_svc._normalize_heading_text(section_title or "")
+        if normalized_title:
+            for index in range(start_index, len(parsed_sections)):
+                heading = parsed_sections[index].get("heading") or ""
+                if self.section_svc._normalize_heading_text(heading) == normalized_title:
+                    return index
+
+        if start_index < len(parsed_sections):
+            return start_index
+        return None
+
+    def _map_subsection_groups_to_chunks(
+        self,
+        section_chunks: list[dict],
+        subsection_groups: list[dict],
+    ) -> list[dict]:
+        nodes: list[dict] = []
+        search_start = 0
+
+        for group in subsection_groups:
+            title = " ".join((group.get("title") or "").strip().split())
+            if not title:
+                continue
+
+            relative_index = self._find_subsection_start_chunk(
+                section_chunks[search_start:],
+                group.get("paragraphs", []),
+            )
+            if relative_index is None:
+                if search_start >= len(section_chunks):
+                    break
+                relative_index = 0
+
+            chunk = section_chunks[search_start + relative_index]
+            if not nodes or nodes[-1]["chunk_index"] != chunk["chunk_index"]:
+                nodes.append({
+                    "chunk_index": chunk["chunk_index"],
+                    "brief_summary": title,
+                })
+
+            search_start = min(search_start + relative_index + 1, len(section_chunks))
+
+        return nodes
+
+    def _find_subsection_start_chunk(
+        self,
+        section_chunks: list[dict],
+        group_paragraphs: list[str],
+    ) -> int | None:
+        if not section_chunks or not group_paragraphs:
+            return None
+
+        first_paragraph = self._normalize_match_text(group_paragraphs[0])
+        if first_paragraph:
+            paragraph_probe = first_paragraph[:120]
+            for index, chunk in enumerate(section_chunks):
+                chunk_text = self._normalize_match_text(chunk.get("text"))
+                if not chunk_text:
+                    continue
+                if paragraph_probe and (
+                    paragraph_probe in chunk_text or
+                    chunk_text[:120] in first_paragraph
+                ):
+                    return index
+
+        group_text = self._normalize_match_text(" ".join(group_paragraphs))
+        if not group_text:
+            return None
+
+        group_probe = group_text[:160]
+        for index, chunk in enumerate(section_chunks):
+            chunk_text = self._normalize_match_text(chunk.get("text"))
+            if not chunk_text:
+                continue
+            if group_probe in chunk_text or chunk_text[:160] in group_text:
+                return index
+
+        return None
+
+    def _normalize_match_text(self, text: str | None) -> str:
+        return " ".join((text or "").lower().split())
+
     async def _describe_goal_sections(self, session) -> str:
         """Summarize the ordered sections visited during goal-directed reading."""
         chunks_meta = await self._get_all_chunks_meta(session)
@@ -393,8 +551,16 @@ class ReadingAgent:
         chunks = await self._get_all_chunks_meta(session)
         sections_meta = await self._get_sections_meta(session)
         normalized_chunks = self._apply_sections_to_chunks(chunks, sections_meta)
+        explicit_subsections = await self._recover_explicit_subsections(
+            session,
+            sections_meta,
+            normalized_chunks,
+        )
         return await self.section_svc.generate_mind_map(
-            str(session.document_id), sections_meta, normalized_chunks
+            str(session.document_id),
+            sections_meta,
+            normalized_chunks,
+            explicit_subsections=explicit_subsections,
         )
 
     # ── Set Goal (goal-directed mode) ─────────────────────────────────────
@@ -594,18 +760,11 @@ class ReadingAgent:
 
     async def handle_quiz_wrong_action(self, session_id: str, action: str, chunk_index: int) -> dict:
         """Handle user's choice after failing a quiz: retry, mark, or skip."""
-        session = await self.memory_svc.get_session(session_id)
-
         if action == "retry":
             return {"action": "retry", "message": "Let's try again!"}
 
         if action == "mark_for_later":
-            marked = list(session.marked_for_retry or [])
-            if chunk_index not in marked:
-                marked.append(chunk_index)
-                session.marked_for_retry = marked
-            await self.db.commit()
-            await self.memory_svc.unlock_next_chunk(session_id)
+            await self.memory_svc.mark_chunk_for_retry_and_unlock(session_id, chunk_index)
             return {"action": "marked", "message": "Marked for review. Moving on."}
 
         # skip

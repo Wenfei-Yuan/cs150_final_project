@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from app.db.models.chunk import Chunk
 from app.db.models.reading_session import ReadingSession
-from app.core.exceptions import ChunkLockedError
+from app.core.exceptions import ChunkLockedError, ChunkNotFoundError
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,7 +26,10 @@ class ChunkService:
                 )
             )
         )
-        return result.scalar_one()
+        chunk = result.scalar_one_or_none()
+        if chunk is None:
+            raise ChunkNotFoundError(str(document_id), chunk_index)
+        return chunk
 
     async def get_current_chunk(self, session: ReadingSession) -> Chunk:
         """Return the chunk the session is currently on, enforcing lock."""
