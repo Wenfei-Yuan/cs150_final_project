@@ -1,6 +1,7 @@
 """
 Schemas for the reading flow (session, chunk, retell, quick check).
 """
+from __future__ import annotations
 from uuid import UUID
 from pydantic import BaseModel, Field
 
@@ -52,6 +53,7 @@ class ChunkPacketResponse(BaseModel):
     progress: ProgressInfo
     can_continue: bool = False
     mode: str | None = None
+    user_goal: str | None = None
     retell_required: bool = False
 
 

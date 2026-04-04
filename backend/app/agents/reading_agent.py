@@ -12,6 +12,7 @@ Three modes:
 """
 from __future__ import annotations
 import uuid as _uuid
+import re
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -30,6 +31,7 @@ from app.guardrails.input_guard import InputGuard
 from app.db.models.interaction import Interaction
 from app.schemas.mode import ReadingMode, STRATEGY_PROFILES
 from app.core.logger import get_logger
+from app.utils.pdf_parser import pdf_parser
 
 logger = get_logger(__name__)
 
@@ -94,16 +96,15 @@ class ReadingAgent:
             "recommended_mode": recommended,
             "mode_explanation": result["mode_explanation"],
             "mode_flow_description": result["mode_flow_description"],
-            "alternative_modes": [
-                {"mode": m.value, "description": self.setup_svc.get_mode_description(m.value)}
-                for m in ReadingMode if m.value != recommended
-            ],
+            "alternative_modes": result["alternative_modes"],
+            "available_modes": result["available_modes"],
         }
 
-    async def override_mode(self, session_id: str, mode: str) -> dict:
+    async def override_mode(self, session_id: str, mode: ReadingMode | str) -> dict:
         """User overrides the LLM-suggested mode."""
         session = await self.memory_svc.get_session(session_id)
-        session.mode = mode
+        mode_value = ReadingMode(mode).value
+        session.mode = mode_value
         # Reset reading state for new mode
         session.current_chunk_index = 0
         session.current_section_index = 0
@@ -119,26 +120,26 @@ class ReadingAgent:
         return {
             "session_id": str(session.id),
             "mode": session.mode,
-            "mode_description": self.setup_svc.get_mode_description(mode),
+            "mode_description": self.setup_svc.get_mode_description(mode_value),
         }
 
     async def _initialize_mode(self, session) -> None:
         """Set reading_order and unlocked_chunk_index based on mode."""
         chunks = await self._get_all_chunks_meta(session)
-        mode = session.mode
+        mode = ReadingMode(session.mode)
 
-        if mode == ReadingMode.SKIM.value:
+        if mode == ReadingMode.SKIM:
             sections_meta = await self._get_sections_meta(session)
             order = self.skim_svc.get_reading_order(sections_meta, chunks)
             session.reading_order = order
             session.unlocked_chunk_index = session.total_chunks - 1  # free access
 
-        elif mode == ReadingMode.GOAL_DIRECTED.value:
+        elif mode == ReadingMode.GOAL_DIRECTED:
             # Reading order set later when user sets goal
             session.reading_order = [c["chunk_index"] for c in chunks]
             session.unlocked_chunk_index = session.total_chunks - 1  # free access
 
-        elif mode == ReadingMode.DEEP_COMPREHENSION.value:
+        elif mode == ReadingMode.DEEP_COMPREHENSION:
             order = self.deep_svc.get_reading_order(chunks)
             session.reading_order = order
             session.unlocked_chunk_index = 0  # locked: must pass quiz to advance
@@ -166,15 +167,223 @@ class ReadingAgent:
     async def _get_sections_meta(self, session) -> list[dict]:
         """Get sections metadata from chunk section_type/section_index fields."""
         chunks_meta = await self._get_all_chunks_meta(session)
+        sections_meta = self._build_sections_meta(chunks_meta)
+        if self._needs_section_recovery(chunks_meta, sections_meta):
+            recovered_sections = await self._recover_sections_meta(session, chunks_meta)
+            if recovered_sections:
+                return recovered_sections
+        return sections_meta
+
+    def _needs_section_recovery(
+        self,
+        chunks_meta: list[dict],
+        sections_meta: list[dict],
+    ) -> bool:
+        if len(chunks_meta) <= 1:
+            return False
+        if any(c.get("section_index") is not None for c in chunks_meta):
+            return False
+        if len(sections_meta) <= 1:
+            return True
+
+        titles = {(section.get("title") or "").strip().lower() for section in sections_meta}
+        return titles == {"preamble"}
+
+    async def _recover_sections_meta(self, session, chunks_meta: list[dict]) -> list[dict]:
+        try:
+            document = await self.memory_svc.get_document(str(session.document_id))
+        except Exception:
+            return []
+
+        if not getattr(document, "file_path", None):
+            return []
+
+        try:
+            parsed = pdf_parser.extract(document.file_path)
+        except Exception:
+            return []
+
+        recovered_sections: list[tuple[int, str]] = []
+        for section in parsed.get("sections", []):
+            title = (section.get("heading") or "").strip()
+            if not title or title.lower() == "preamble":
+                continue
+            chunk_index = self._find_heading_chunk_index(chunks_meta, title)
+            if chunk_index is None:
+                continue
+            if recovered_sections and chunk_index <= recovered_sections[-1][0]:
+                continue
+            recovered_sections.append((chunk_index, title))
+
+        if not recovered_sections:
+            return []
+
+        sections_meta: list[dict] = []
+        section_offset = 0
+        if recovered_sections[0][0] > 0:
+            sections_meta.append({
+                "section_type": self._infer_section_type(chunks_meta[0].get("section") or "preamble"),
+                "section_index": 0,
+                "title": chunks_meta[0].get("section") or "preamble",
+                "chunk_indices": list(range(0, recovered_sections[0][0])),
+            })
+            section_offset = 1
+
+        for recovered_idx, (start_chunk, title) in enumerate(recovered_sections):
+            next_start = (
+                recovered_sections[recovered_idx + 1][0]
+                if recovered_idx + 1 < len(recovered_sections)
+                else len(chunks_meta)
+            )
+            chunk_indices = list(range(start_chunk, next_start))
+            if not chunk_indices:
+                continue
+            sections_meta.append({
+                "section_type": self._infer_section_type(title),
+                "section_index": section_offset + recovered_idx,
+                "title": title,
+                "chunk_indices": chunk_indices,
+            })
+
+        if len(sections_meta) <= 1:
+            return []
+
+        return sections_meta
+
+    def _find_heading_chunk_index(self, chunks_meta: list[dict], title: str) -> int | None:
+        search_terms = [title.strip()]
+        stripped_title = re.sub(r"^(?:\d+(?:\.\d+)*)\s+", "", title.strip())
+        if stripped_title and stripped_title != title.strip():
+            search_terms.append(stripped_title)
+
+        normalized_terms = [" ".join(term.lower().split()) for term in search_terms if term]
+        for chunk in chunks_meta:
+            chunk_text = " ".join((chunk.get("text") or "").lower().split())
+            if any(term and term in chunk_text for term in normalized_terms):
+                return chunk["chunk_index"]
+        return None
+
+    def _build_sections_meta(self, chunks_meta: list[dict]) -> list[dict]:
         sections: dict[int, dict] = {}
+        has_persisted_sections = bool(chunks_meta) and all(
+            c.get("section_index") is not None for c in chunks_meta
+        )
+
+        if has_persisted_sections:
+            for c in chunks_meta:
+                si = c.get("section_index")
+                if si is None:
+                    continue
+                entry = sections.setdefault(
+                    si,
+                    {
+                        "section_type": c.get("section_type") or self._infer_section_type(c.get("section")),
+                        "section_index": si,
+                        "title": c.get("section") or f"Section {si + 1}",
+                        "chunk_indices": [],
+                    },
+                )
+                if c.get("section") and entry["title"].startswith("Section "):
+                    entry["title"] = c["section"]
+                entry["chunk_indices"].append(c["chunk_index"])
+            return [sections[idx] for idx in sorted(sections)]
+
+        fallback_sections: list[dict] = []
         for c in chunks_meta:
-            si = c.get("section_index")
-            if si is not None and si not in sections:
-                sections[si] = {
-                    "section_type": c.get("section_type", "other"),
-                    "section_index": si,
+            title = c.get("section") or f"Chunk {c['chunk_index'] + 1}"
+            if not fallback_sections or fallback_sections[-1]["title"] != title:
+                fallback_sections.append(
+                    {
+                        "section_type": c.get("section_type") or self._infer_section_type(title),
+                        "section_index": len(fallback_sections),
+                        "title": title,
+                        "chunk_indices": [c["chunk_index"]],
+                    }
+                )
+            else:
+                fallback_sections[-1]["chunk_indices"].append(c["chunk_index"])
+        return fallback_sections
+
+    def _apply_sections_to_chunks(
+        self,
+        chunks_meta: list[dict],
+        sections_meta: list[dict],
+    ) -> list[dict]:
+        section_by_chunk_index: dict[int, dict] = {}
+        for section in sections_meta:
+            for chunk_index in section.get("chunk_indices", []):
+                section_by_chunk_index[chunk_index] = section
+
+        normalized_chunks = []
+        for chunk in chunks_meta:
+            section = section_by_chunk_index.get(chunk["chunk_index"])
+            if not section:
+                normalized_chunks.append(chunk)
+                continue
+
+            normalized_chunks.append(
+                {
+                    **chunk,
+                    "section": chunk.get("section") or section["title"],
+                    "section_type": chunk.get("section_type") or section["section_type"],
+                    "section_index": section["section_index"],
                 }
-        return list(sections.values())
+            )
+
+        return normalized_chunks
+
+    async def _describe_goal_sections(self, session) -> str:
+        """Summarize the ordered sections visited during goal-directed reading."""
+        chunks_meta = await self._get_all_chunks_meta(session)
+        if not chunks_meta:
+            return "(reading session)"
+
+        sections_meta = self._build_sections_meta(chunks_meta)
+        normalized_chunks = self._apply_sections_to_chunks(chunks_meta, sections_meta)
+        chunk_by_index = {chunk["chunk_index"]: chunk for chunk in normalized_chunks}
+        ordered_indices = session.reading_order or [chunk["chunk_index"] for chunk in normalized_chunks]
+
+        seen_titles: set[str] = set()
+        section_titles: list[str] = []
+        for chunk_index in ordered_indices:
+            chunk = chunk_by_index.get(chunk_index)
+            if not chunk:
+                continue
+            title = chunk.get("section") or f"Chunk {chunk_index + 1}"
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+            section_titles.append(title)
+
+        if not section_titles:
+            return "(reading session)"
+        if len(section_titles) > 8:
+            return ", ".join(section_titles[:8]) + ", ..."
+        return ", ".join(section_titles)
+
+    def _infer_section_type(self, title: str | None) -> str:
+        title_lower = (title or "").strip().lower()
+        section_type_map = {
+            "abstract": "abstract",
+            "introduction": "introduction",
+            "related work": "related_work",
+            "background": "background",
+            "method": "methods",
+            "methodology": "methods",
+            "approach": "methods",
+            "experiment": "experiment",
+            "evaluation": "experiment",
+            "result": "results",
+            "discussion": "discussion",
+            "conclusion": "conclusion",
+            "appendix": "appendix",
+            "figure": "figures_tables",
+            "table": "figures_tables",
+        }
+        for keyword, mapped_type in section_type_map.items():
+            if keyword in title_lower:
+                return mapped_type
+        return "other"
 
     # ── Mind Map ──────────────────────────────────────────────────────────
 
@@ -183,8 +392,9 @@ class ReadingAgent:
         session = await self.memory_svc.get_session(session_id)
         chunks = await self._get_all_chunks_meta(session)
         sections_meta = await self._get_sections_meta(session)
+        normalized_chunks = self._apply_sections_to_chunks(chunks, sections_meta)
         return await self.section_svc.generate_mind_map(
-            str(session.document_id), sections_meta, chunks
+            str(session.document_id), sections_meta, normalized_chunks
         )
 
     # ── Set Goal (goal-directed mode) ─────────────────────────────────────
@@ -248,6 +458,7 @@ class ReadingAgent:
             "annotated_summary": summary_data["annotated_summary"],
             "key_terms": summary_data["key_terms"],
             "mode": mode,
+            "user_goal": session.user_goal,
             "progress": {
                 "current": session.current_chunk_index,
                 "total": session.total_chunks,
@@ -435,24 +646,32 @@ class ReadingAgent:
         mode = session.mode or "deep_comprehension"
 
         if mode == ReadingMode.GOAL_DIRECTED.value:
+            sections_read = await self._describe_goal_sections(session)
             result = await self.goal_svc.evaluate_goal_answer(
                 goal=session.user_goal or "",
-                sections_read="(reading session)",
+                sections_read=sections_read,
                 answer_text=takeaway_text,
             )
-            feedback = result["feedback"]
+            response = {
+                "feedback": result["feedback"],
+                "strengths": result.get("strengths", []),
+                "limitations": result.get("limitations", []),
+                "status": "completed",
+            }
         elif mode == ReadingMode.SKIM.value:
             feedback = await self.skim_svc.evaluate_takeaway(
                 sections_read="(skim reading session)",
                 takeaway_text=takeaway_text,
             )
+            response = {"feedback": feedback, "status": "completed"}
         else:
             feedback = await self.deep_svc.evaluate_takeaway(takeaway_text)
+            response = {"feedback": feedback, "status": "completed"}
 
         session.status = "completed"
         await self.db.commit()
 
-        return {"feedback": feedback, "status": "completed"}
+        return response
 
     # ── Jump to section (skim / goal-directed) ────────────────────────────
 
@@ -460,27 +679,23 @@ class ReadingAgent:
         """Jump to the first chunk of a given section."""
         session = await self.memory_svc.get_session(session_id)
 
-        strategy = STRATEGY_PROFILES.get(ReadingMode(session.mode or "deep_comprehension"))
-        if not strategy or not strategy.allow_jump:
-            return {"error": "Jump not allowed in deep comprehension mode."}
-
         # Save current position for potential return
         session.jump_return_index = session.current_chunk_index
 
-        # Find first chunk in the target section
-        from app.db.models.chunk import Chunk
-        result = await self.db.execute(
-            select(Chunk)
-            .where(Chunk.document_id == session.document_id, Chunk.section_index == section_index)
-            .order_by(Chunk.chunk_index)
-            .limit(1)
+        sections_meta = await self._get_sections_meta(session)
+        target_section = next(
+            (sec for sec in sections_meta if sec["section_index"] == section_index),
+            None,
         )
-        chunk = result.scalar_one_or_none()
-        if not chunk:
+        if not target_section or not target_section.get("chunk_indices"):
             return {"error": f"No chunks found for section {section_index}."}
+
+        first_chunk_index = target_section["chunk_indices"][0]
+        chunk = await self.chunk_svc.get_chunk_by_index(session.document_id, first_chunk_index)
 
         session.current_chunk_index = chunk.chunk_index
         session.current_section_index = section_index
+        session.unlocked_chunk_index = max(session.unlocked_chunk_index, chunk.chunk_index)
         await self.db.commit()
         await self.db.refresh(session)
 

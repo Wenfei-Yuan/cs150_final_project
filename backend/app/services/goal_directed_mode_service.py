@@ -7,13 +7,14 @@ Strategy:
   question_mode = goal_helpfulness (yes/no + T/F question)
   gating_mode = none
   chunk_checkpoint = False
-  session_checkpoint = takeaway (try to answer goal question)
+    session_checkpoint = goal_answer (state whether the goal info was found, then answer the goal question)
 
 LLM calls:
   - goal_relevance_ranking: rank chunks by relevance to user's goal
   - chunk_quiz_generation: generate a T/F question per chunk
   - goal_answer_feedback: evaluate user's final answer to their goal question
 """
+from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.llm.client import chat_completion_json
 from app.llm.parser import parse_and_validate
@@ -21,7 +22,6 @@ from app.schemas.llm_mode import (
     GOAL_RELEVANCE_SCHEMA,
     CHUNK_QUIZ_SCHEMA,
     GOAL_ANSWER_FEEDBACK_SCHEMA,
-    TAKEAWAY_FEEDBACK_SCHEMA,
 )
 from app.core.logger import get_logger
 
@@ -83,9 +83,10 @@ Return JSON:
 
 _GOAL_ANSWER_SYSTEM = (
     "You are a supportive reading tutor for ADHD students. "
-    "The student had a specific research goal and has now finished reading. "
-    "Evaluate their answer to their original question. "
-    "Give balanced feedback: what they captured well and what might be missing. "
+        "The student had a specific research goal and has now finished reading. "
+        "This is the final goal-answer checkpoint. Determine whether they extracted the goal-relevant information "
+        "and how well they answered their original question. "
+        "Give balanced feedback: what they captured well and what might still be missing or uncertain. "
     "NO scores. Be encouraging. Respond ONLY with valid JSON."
 )
 
@@ -95,7 +96,8 @@ The student's original goal/question: {goal}
 Relevant sections they read:
 {sections_read}
 
-Their answer to their goal question:
+Their final checkpoint response. It may mention whether they found the target information,
+and it may attempt to answer the original goal/question:
 {answer_text}
 
 If the answer is empty, still provide encouragement.
@@ -104,7 +106,7 @@ Return JSON:
 {{
   "feedback": "Overall encouraging feedback (2-3 sentences)",
   "strengths": ["What they captured well"],
-  "limitations": ["What they might want to revisit, phrased gently"]
+    "limitations": ["What they might want to revisit, phrased gently"]
 }}
 """
 

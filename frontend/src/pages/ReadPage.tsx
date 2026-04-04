@@ -3,7 +3,14 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { Document, Page, pdfjs } from 'react-pdf'
 import 'react-pdf/dist/Page/TextLayer.css'
 import 'react-pdf/dist/Page/AnnotationLayer.css'
-import { api, type ChunkPacket, type RetellResult, type QuickCheckResult } from '@/lib/api'
+import {
+  api,
+  type ChunkPacket,
+  type MindMapResponse,
+  type MindMapSection,
+  type QuickCheckResult,
+  type RetellResult,
+} from '@/lib/api'
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -102,6 +109,82 @@ function Progress({ current, total, stage }: { current: number; total: number; s
   )
 }
 
+function MindMapPanel({
+  mindMap,
+  activeSectionIndex,
+  loading,
+  error,
+  jumpingSection,
+  onJump,
+}: {
+  mindMap: MindMapResponse | null
+  activeSectionIndex: number | null
+  loading: boolean
+  error: string | null
+  jumpingSection: number | null
+  onJump: (section: MindMapSection) => Promise<void>
+}) {
+  return (
+    <aside className="w-72 shrink-0 border-r border-border bg-muted/20 overflow-y-auto">
+      <div className="px-4 py-5 space-y-4">
+        <div className="space-y-1">
+          <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground">Mind Map</p>
+          <p className="text-sm text-foreground">Navigate by section at any point in the reading flow.</p>
+        </div>
+
+        {loading && <p className="text-xs text-muted-foreground">Loading section map…</p>}
+        {error && <p className="text-xs text-destructive">{error}</p>}
+        {!loading && !error && (!mindMap || mindMap.sections.length === 0) && (
+          <p className="text-xs text-muted-foreground">No section map is available for this document yet.</p>
+        )}
+
+        {mindMap?.sections.map((section) => {
+          const isActive = section.section_index === activeSectionIndex
+          const isJumping = section.section_index === jumpingSection
+
+          return (
+            <button
+              key={section.section_index}
+              onClick={() => void onJump(section)}
+              disabled={isJumping}
+              className={`w-full rounded-2xl border px-3 py-3 text-left transition-colors ${
+                isActive
+                  ? 'border-foreground bg-background shadow-sm'
+                  : 'border-border bg-background/70 hover:border-foreground/40 hover:bg-background'
+              } ${isJumping ? 'opacity-60' : ''}`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <p className="text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+                    {section.section_type.replaceAll('_', ' ')}
+                  </p>
+                  <p className="text-sm font-medium text-foreground">{section.title}</p>
+                </div>
+                <span className="text-[11px] text-muted-foreground">{section.chunk_indices.length} chunks</span>
+              </div>
+
+              <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{section.summary}</p>
+
+              {section.sub_chunks.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {section.sub_chunks.map((sub) => (
+                    <span
+                      key={sub.chunk_index}
+                      className="rounded-full border border-border px-2 py-1 text-[11px] text-muted-foreground"
+                    >
+                      {sub.chunk_index + 1}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </button>
+          )
+        })}
+      </div>
+    </aside>
+  )
+}
+
 export default function ReadPage() {
   const { sessionId } = useParams<{ sessionId: string }>()
   const navigate = useNavigate()
@@ -110,6 +193,10 @@ export default function ReadPage() {
   const [stage, setStage] = useState<Stage>('read')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [mindMap, setMindMap] = useState<MindMapResponse | null>(null)
+  const [mindMapLoading, setMindMapLoading] = useState(false)
+  const [mindMapError, setMindMapError] = useState<string | null>(null)
+  const [jumpingSection, setJumpingSection] = useState<number | null>(null)
 
   const [retell, setRetell] = useState('')
   const [retellResult, setRetellResult] = useState<RetellResult | null>(null)
@@ -121,7 +208,9 @@ export default function ReadPage() {
   const [pdfOpen, setPdfOpen] = useState(false)
 
   useEffect(() => {
-    if (sessionId) loadChunk()
+    if (!sessionId) return
+    void loadChunk()
+    void loadMindMap()
   }, [sessionId])
 
   async function loadChunk() {
@@ -139,6 +228,20 @@ export default function ReadPage() {
       setError(e instanceof Error ? e.message : 'Failed to load chunk.')
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function loadMindMap() {
+    setMindMapLoading(true)
+    setMindMapError(null)
+    try {
+      const data = await api.getMindMap(sessionId!)
+      setMindMap(data)
+    } catch (e) {
+      setMindMap(null)
+      setMindMapError(e instanceof Error ? e.message : 'Failed to load mind map.')
+    } finally {
+      setMindMapLoading(false)
     }
   }
 
@@ -194,6 +297,24 @@ export default function ReadPage() {
     }
   }
 
+  async function handleJumpToSection(section: MindMapSection) {
+    if (!sessionId) return
+
+    setJumpingSection(section.section_index)
+    setError(null)
+    try {
+      const result = await api.jumpToSection(sessionId, section.section_index)
+      if (result.error) {
+        throw new Error(result.error)
+      }
+      await loadChunk()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not jump to section.')
+    } finally {
+      setJumpingSection(null)
+    }
+  }
+
   // ── Loading / error ───────────────────────────────────────────────────────────
 
   if (loading) {
@@ -221,6 +342,8 @@ export default function ReadPage() {
   if (!chunk) return null
 
   const { current, total } = chunk.progress
+  const activeSectionIndex =
+    mindMap?.sections.find((section) => section.chunk_indices.includes(chunk.chunk_index))?.section_index ?? null
 
   const retellPassed = retellResult?.passed ?? false
   const quizPassed = quizResult?.passed ?? false
@@ -303,31 +426,44 @@ export default function ReadPage() {
     return (
       <div className="min-h-screen bg-background flex flex-col">
         {topBar}
-        <div className="max-w-2xl mx-auto w-full px-6 py-12 space-y-8">
-          <p className="text-base leading-relaxed text-foreground" style={{ fontFamily: 'Verdana, sans-serif' }}>
-            {chunk.text}
-          </p>
+        <div className="flex flex-1 overflow-hidden">
+          <MindMapPanel
+            mindMap={mindMap}
+            activeSectionIndex={activeSectionIndex}
+            loading={mindMapLoading}
+            error={mindMapError}
+            jumpingSection={jumpingSection}
+            onJump={handleJumpToSection}
+          />
 
-          {chunk.annotated_summary.length > 0 && (
-            <div className="border-t border-border pt-6 space-y-2">
-              <p className="text-xs uppercase tracking-widest text-muted-foreground">Summary</p>
-              <ul className="space-y-1">
-                {chunk.annotated_summary.map((line, i) => (
-                  <li key={i} className="text-sm leading-relaxed text-muted-foreground">{line}</li>
-                ))}
-              </ul>
-            </div>
-          )}
+          <div className="flex-1 overflow-y-auto">
+            <div className="max-w-2xl mx-auto w-full px-6 py-12 space-y-8">
+              <p className="text-base leading-relaxed text-foreground" style={{ fontFamily: 'Verdana, sans-serif' }}>
+                {chunk.text}
+              </p>
 
-          {chunk.key_terms.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {chunk.key_terms.map((kt) => (
-                <span key={kt.term} title={kt.note} className="text-xs px-2 py-1 rounded border border-border text-muted-foreground cursor-default">
-                  {kt.term}
-                </span>
-              ))}
+              {chunk.annotated_summary.length > 0 && (
+                <div className="border-t border-border pt-6 space-y-2">
+                  <p className="text-xs uppercase tracking-widest text-muted-foreground">Summary</p>
+                  <ul className="space-y-1">
+                    {chunk.annotated_summary.map((line, i) => (
+                      <li key={i} className="text-sm leading-relaxed text-muted-foreground">{line}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {chunk.key_terms.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {chunk.key_terms.map((kt) => (
+                    <span key={kt.term} title={kt.note} className="text-xs px-2 py-1 rounded border border-border text-muted-foreground cursor-default">
+                      {kt.term}
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       </div>
     )
@@ -340,6 +476,14 @@ export default function ReadPage() {
       {topBar}
 
       <div className="flex flex-1 overflow-hidden">
+        <MindMapPanel
+          mindMap={mindMap}
+          activeSectionIndex={activeSectionIndex}
+          loading={mindMapLoading}
+          error={mindMapError}
+          jumpingSection={jumpingSection}
+          onJump={handleJumpToSection}
+        />
 
         {/* 1st column — PDF */}
         {pdfOpen && (

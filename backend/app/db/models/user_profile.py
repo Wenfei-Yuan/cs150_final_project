@@ -2,6 +2,7 @@
 User learning profile — persisted across documents (long-term memory).
 """
 import uuid
+from typing import Optional
 from datetime import datetime
 from sqlalchemy import String, DateTime, JSON, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -21,10 +22,10 @@ class UserProfileMemory(Base):
     common_mistakes: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # "concise" | "encouraging" | "detailed"
-    preferred_feedback_style: Mapped[str | None] = mapped_column(String(32))
+    preferred_feedback_style: Mapped[Optional[str]] = mapped_column(String(32))
 
     # Convenience — doc ID of the last reading
-    last_document_id: Mapped[str | None] = mapped_column(String(64))
+    last_document_id: Mapped[Optional[str]] = mapped_column(String(64))
 
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
                                                   server_default=func.now(),

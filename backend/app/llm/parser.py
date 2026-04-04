@@ -2,6 +2,7 @@
 LLM output parser — validates JSON against a JSON Schema and converts to
 Python dicts / Pydantic models.
 """
+from __future__ import annotations
 import json
 import jsonschema
 from app.core.exceptions import LLMOutputSchemaError

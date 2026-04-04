@@ -46,6 +46,29 @@ SECTION_IDENTIFICATION_SCHEMA = {
     "additionalProperties": False,
 }
 
+SEMANTIC_SUBDIVISION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "groups": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "start_paragraph_index": {"type": "integer", "minimum": 0},
+                    "end_paragraph_index": {"type": "integer", "minimum": 0},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["title", "start_paragraph_index", "end_paragraph_index", "rationale"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["groups"],
+    "additionalProperties": False,
+}
+
 MIND_MAP_SCHEMA = {
     "type": "object",
     "properties": {

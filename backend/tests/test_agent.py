@@ -71,3 +71,408 @@ async def test_quick_check_unlocks_chunk():
 
     assert result["pass"] is True
     agent.memory_svc.unlock_next_chunk.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_get_mind_map_rebuilds_sections_for_legacy_chunks():
+    """Mind map generation should work for older documents without persisted section metadata."""
+    from app.agents.reading_agent import ReadingAgent
+
+    db = AsyncMock()
+    agent = ReadingAgent(db)
+
+    session = MagicMock()
+    session.document_id = uuid4()
+
+    agent.memory_svc.get_session = AsyncMock(return_value=session)
+    agent._get_all_chunks_meta = AsyncMock(return_value=[
+        {
+            "chunk_index": 0,
+            "text": "Abstract chunk",
+            "section": "Abstract",
+            "section_type": None,
+            "section_index": None,
+        },
+        {
+            "chunk_index": 1,
+            "text": "More abstract",
+            "section": "Abstract",
+            "section_type": None,
+            "section_index": None,
+        },
+        {
+            "chunk_index": 2,
+            "text": "Introduction chunk",
+            "section": "Introduction",
+            "section_type": None,
+            "section_index": None,
+        },
+    ])
+    agent.section_svc.generate_mind_map = AsyncMock(return_value={
+        "document_id": str(session.document_id),
+        "sections": [
+            {
+                "section_index": 0,
+                "section_type": "abstract",
+                "title": "Abstract",
+                "summary": "Abstract summary",
+                "chunk_indices": [0, 1],
+                "sub_chunks": [],
+            },
+            {
+                "section_index": 1,
+                "section_type": "introduction",
+                "title": "Introduction",
+                "summary": "Introduction summary",
+                "chunk_indices": [2],
+                "sub_chunks": [],
+            },
+        ],
+    })
+
+    result = await agent.get_mind_map(str(uuid4()))
+
+    assert len(result["sections"]) == 2
+    _, sections_meta, chunks_meta = agent.section_svc.generate_mind_map.await_args.args
+    assert sections_meta == [
+        {
+            "section_type": "abstract",
+            "section_index": 0,
+            "title": "Abstract",
+            "chunk_indices": [0, 1],
+        },
+        {
+            "section_type": "introduction",
+            "section_index": 1,
+            "title": "Introduction",
+            "chunk_indices": [2],
+        },
+    ]
+    assert chunks_meta[0]["section"] == "Abstract"
+    assert chunks_meta[0]["section_index"] == 0
+    assert chunks_meta[2]["section_index"] == 1
+
+
+@pytest.mark.asyncio
+@patch("app.agents.reading_agent.pdf_parser")
+async def test_get_sections_meta_recovers_headings_from_document_for_broken_legacy_chunks(mock_pdf_parser):
+    """Fallback should recover multiple sections when legacy chunk metadata collapses to preamble."""
+    from app.agents.reading_agent import ReadingAgent
+
+    db = AsyncMock()
+    agent = ReadingAgent(db)
+
+    session = MagicMock()
+    session.document_id = uuid4()
+    document = MagicMock()
+    document.file_path = "legacy.pdf"
+
+    agent.memory_svc.get_document = AsyncMock(return_value=document)
+    agent._get_all_chunks_meta = AsyncMock(return_value=[
+        {
+            "chunk_index": 0,
+            "text": "Paper title and overview.",
+            "section": "preamble",
+            "section_type": None,
+            "section_index": None,
+        },
+        {
+            "chunk_index": 1,
+            "text": "1 INTRODUCTION We introduce the system.",
+            "section": "preamble",
+            "section_type": None,
+            "section_index": None,
+        },
+        {
+            "chunk_index": 2,
+            "text": "2 METHODS We evaluated the interface.",
+            "section": "preamble",
+            "section_type": None,
+            "section_index": None,
+        },
+        {
+            "chunk_index": 3,
+            "text": "3 RESULTS Participants liked the tool.",
+            "section": "preamble",
+            "section_type": None,
+            "section_index": None,
+        },
+    ])
+    mock_pdf_parser.extract.return_value = {
+        "sections": [
+            {"heading": "1 INTRODUCTION", "paragraphs": ["intro"]},
+            {"heading": "2 METHODS", "paragraphs": ["methods"]},
+            {"heading": "3 RESULTS", "paragraphs": ["results"]},
+        ]
+    }
+
+    sections_meta = await agent._get_sections_meta(session)
+
+    assert [section["title"] for section in sections_meta] == [
+        "preamble",
+        "1 INTRODUCTION",
+        "2 METHODS",
+        "3 RESULTS",
+    ]
+    assert sections_meta[0]["chunk_indices"] == [0]
+    assert sections_meta[1]["chunk_indices"] == [1]
+    assert sections_meta[2]["chunk_indices"] == [2]
+    assert sections_meta[3]["chunk_indices"] == [3]
+
+
+@pytest.mark.asyncio
+@patch("app.services.section_chunking_service.chat_completion_json", new_callable=AsyncMock)
+async def test_generate_mind_map_preserves_actual_section_indices(mock_chat_completion):
+    """Mind map responses should preserve real section ids instead of enumerate positions."""
+    from app.services.section_chunking_service import SectionChunkingService
+
+    mock_chat_completion.return_value = {
+        "sections": [
+            {
+                "section_type": "introduction",
+                "title": "Introduction",
+                "summary": "Intro summary",
+                "sub_chunk_summaries": ["Intro chunk"],
+            },
+            {
+                "section_type": "methods",
+                "title": "Methods",
+                "summary": "Methods summary",
+                "sub_chunk_summaries": ["Methods chunk"],
+            },
+        ]
+    }
+
+    service = SectionChunkingService(AsyncMock())
+    result = await service.generate_mind_map(
+        "doc-1",
+        [
+            {
+                "section_index": 4,
+                "section_type": "introduction",
+                "title": "Introduction",
+                "chunk_indices": [0],
+            },
+            {
+                "section_index": 10,
+                "section_type": "methods",
+                "title": "Methods",
+                "chunk_indices": [1],
+            },
+        ],
+        [
+            {"chunk_index": 0, "section_index": 4, "text": "Introduction text"},
+            {"chunk_index": 1, "section_index": 10, "text": "Methods text"},
+        ],
+    )
+
+    assert [section["section_index"] for section in result["sections"]] == [4, 10]
+    assert result["sections"][0]["chunk_indices"] == [0]
+    assert result["sections"][1]["chunk_indices"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_submit_setup_answers_returns_normalized_mode_choices():
+    """Setup response should preserve typed mode choices for the CLI reselection flow."""
+    from app.agents.reading_agent import ReadingAgent
+
+    db = AsyncMock()
+    agent = ReadingAgent(db)
+
+    session = MagicMock()
+    session.id = uuid4()
+
+    agent.memory_svc.get_session = AsyncMock(return_value=session)
+    agent.setup_svc.determine_mode = AsyncMock(return_value={
+        "recommended_mode": "deep_comprehension",
+        "mode_explanation": "Deep mode fits the user's goal.",
+        "mode_flow_description": "Read sequentially, retell, then answer a quiz.",
+        "alternative_modes": [
+            {
+                "mode": "skim",
+                "name": "Skim / Overview Mode",
+                "description": "Quick overview of the paper.",
+            },
+            {
+                "mode": "goal_directed",
+                "name": "Goal-Directed Search Mode",
+                "description": "Read only the chunks relevant to your goal.",
+            },
+        ],
+        "available_modes": [
+            {
+                "mode": "skim",
+                "name": "Skim / Overview Mode",
+                "description": "Quick overview of the paper.",
+            },
+            {
+                "mode": "goal_directed",
+                "name": "Goal-Directed Search Mode",
+                "description": "Read only the chunks relevant to your goal.",
+            },
+            {
+                "mode": "deep_comprehension",
+                "name": "Deep Comprehension Mode",
+                "description": "Read every chunk in order with a quiz gate.",
+            },
+        ],
+    })
+    agent._initialize_mode = AsyncMock()
+
+    result = await agent.submit_setup_answers(str(uuid4()), 0, 1, 2)
+
+    assert result["recommended_mode"] == "deep_comprehension"
+    assert len(result["available_modes"]) == 3
+    assert all(isinstance(choice["description"], str) for choice in result["alternative_modes"])
+    assert session.mode == "deep_comprehension"
+    assert session.status == "active"
+    agent._initialize_mode.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_override_mode_rejects_invalid_mode_value():
+    """Direct agent usage should still reject invalid mode strings."""
+    from app.agents.reading_agent import ReadingAgent
+
+    db = AsyncMock()
+    agent = ReadingAgent(db)
+    agent.memory_svc.get_session = AsyncMock(return_value=MagicMock())
+
+    with pytest.raises(ValueError):
+        await agent.override_mode(str(uuid4()), "invalid_mode")
+
+
+@pytest.mark.asyncio
+async def test_jump_to_section_uses_rebuilt_sections_and_unlocks_target():
+    """Jump navigation should work even when section indices were never persisted."""
+    from app.agents.reading_agent import ReadingAgent
+
+    db = AsyncMock()
+    agent = ReadingAgent(db)
+
+    session = MagicMock()
+    session.document_id = uuid4()
+    session.current_chunk_index = 0
+    session.current_section_index = 0
+    session.unlocked_chunk_index = 0
+
+    chunk = MagicMock()
+    chunk.chunk_index = 4
+
+    agent.memory_svc.get_session = AsyncMock(return_value=session)
+    agent._get_all_chunks_meta = AsyncMock(return_value=[
+        {
+            "chunk_index": 0,
+            "text": "Abstract chunk",
+            "section": "Abstract",
+            "section_type": None,
+            "section_index": None,
+        },
+        {
+            "chunk_index": 4,
+            "text": "Methods chunk",
+            "section": "Methods",
+            "section_type": None,
+            "section_index": None,
+        },
+    ])
+    agent.chunk_svc.get_chunk_by_index = AsyncMock(return_value=chunk)
+
+    result = await agent.jump_to_section(str(uuid4()), 1)
+
+    assert result["jumped_to_chunk"] == 4
+    assert session.jump_return_index == 0
+    assert session.current_chunk_index == 4
+    assert session.current_section_index == 1
+    assert session.unlocked_chunk_index == 4
+    agent.chunk_svc.get_chunk_by_index.assert_awaited_once_with(session.document_id, 4)
+
+
+@pytest.mark.asyncio
+async def test_get_chunk_packet_includes_goal_context():
+    """Goal-directed chunk packets should carry the stored goal for the client."""
+    from app.agents.reading_agent import ReadingAgent
+
+    db = AsyncMock()
+    agent = ReadingAgent(db)
+
+    session = MagicMock()
+    session.id = uuid4()
+    session.document_id = uuid4()
+    session.current_chunk_index = 0
+    session.unlocked_chunk_index = 0
+    session.total_chunks = 3
+    session.mode = "goal_directed"
+    session.user_goal = "Find the paper's method"
+
+    chunk = MagicMock()
+    chunk.chunk_index = 0
+    chunk.text = "Methods section text"
+
+    agent.memory_svc.get_session = AsyncMock(return_value=session)
+    agent.chunk_svc.get_current_chunk = AsyncMock(return_value=chunk)
+    agent.rag_svc.retrieve_context_for_summary = AsyncMock(return_value=[])
+    agent.summary_svc.get_or_create_summary = AsyncMock(return_value={
+        "annotated_summary": ["Summary line"],
+        "key_terms": [],
+    })
+
+    result = await agent.get_chunk_packet(str(uuid4()))
+
+    assert result["mode"] == "goal_directed"
+    assert result["user_goal"] == "Find the paper's method"
+    assert result["quick_check_questions"] == []
+
+
+@pytest.mark.asyncio
+async def test_handle_takeaway_goal_mode_returns_structured_feedback():
+    """Goal-directed wrap-up should return feedback plus strengths and limitations."""
+    from app.agents.reading_agent import ReadingAgent
+
+    db = AsyncMock()
+    agent = ReadingAgent(db)
+
+    session = MagicMock()
+    session.mode = "goal_directed"
+    session.user_goal = "What method does the paper use?"
+    session.reading_order = [0, 1]
+    session.status = "active"
+
+    agent.memory_svc.get_session = AsyncMock(return_value=session)
+    agent._get_all_chunks_meta = AsyncMock(return_value=[
+        {
+            "chunk_index": 0,
+            "text": "Intro text",
+            "section": "Introduction",
+            "section_type": "introduction",
+            "section_index": 0,
+        },
+        {
+            "chunk_index": 1,
+            "text": "Method text",
+            "section": "Methods",
+            "section_type": "methods",
+            "section_index": 1,
+        },
+    ])
+    agent.goal_svc.evaluate_goal_answer = AsyncMock(return_value={
+        "feedback": "You found the core method and explained it clearly.",
+        "strengths": ["Identified the method"],
+        "limitations": ["Could mention how it was evaluated"],
+    })
+
+    result = await agent.handle_takeaway(str(uuid4()), "Yes. They used interviews.")
+
+    assert result == {
+        "feedback": "You found the core method and explained it clearly.",
+        "strengths": ["Identified the method"],
+        "limitations": ["Could mention how it was evaluated"],
+        "status": "completed",
+    }
+    assert session.status == "completed"
+    db.commit.assert_awaited_once()
+
+    call = agent.goal_svc.evaluate_goal_answer.await_args.kwargs
+    assert call["goal"] == "What method does the paper use?"
+    assert call["answer_text"] == "Yes. They used interviews."
+    assert call["sections_read"] == "Introduction, Methods"

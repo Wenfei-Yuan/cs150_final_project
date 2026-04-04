@@ -7,6 +7,7 @@ Strategy:
     cumulative token count exceeds MAX_TOKENS — whichever comes first.
   - Never exceed the hard token ceiling.
 """
+from __future__ import annotations
 import re
 from app.core.config import settings
 from app.core.logger import get_logger
@@ -94,6 +95,40 @@ class Chunker:
 
         if current:
             chunks.append(self._make_chunk(current, section))
+
+        return chunks
+
+    def chunk_semantic_groups(
+        self,
+        groups: list[dict],
+        section: str = "",
+    ) -> list[dict]:
+        """
+        Preserve semantic group boundaries first, then apply token safeguards
+        within each group when necessary.
+        """
+        chunks: list[dict] = []
+
+        for index, group in enumerate(groups):
+            paragraphs = [para for para in group.get("paragraphs", []) if para.strip()]
+            if not paragraphs:
+                continue
+
+            group_title = group.get("title") or f"{section} part {index + 1}".strip()
+            group_rationale = group.get("rationale", "")
+            group_text = "\n\n".join(paragraphs)
+
+            if _estimate_tokens(group_text) <= self.max_tokens:
+                chunk = self._make_chunk(paragraphs, section)
+                chunk["semantic_group_title"] = group_title
+                chunk["semantic_group_rationale"] = group_rationale
+                chunks.append(chunk)
+                continue
+
+            for sub_chunk in self.chunk_paragraphs(paragraphs, section=section):
+                sub_chunk["semantic_group_title"] = group_title
+                sub_chunk["semantic_group_rationale"] = group_rationale
+                chunks.append(sub_chunk)
 
         return chunks
 

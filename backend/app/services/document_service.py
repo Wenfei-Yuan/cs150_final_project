@@ -1,6 +1,7 @@
 """
 Document service — handles upload, text extraction, chunking, and DB persistence.
 """
+from __future__ import annotations
 import os
 import uuid
 import shutil
@@ -17,7 +18,8 @@ from app.db.models.chunk import Chunk
 from app.guardrails.input_guard import input_guard
 from app.utils.pdf_parser import pdf_parser
 from app.utils.text_cleaner import text_cleaner
-from app.utils.chunker import chunker
+from app.services.rag_service import RagService
+from app.services.section_chunking_service import SectionChunkingService
 
 logger = get_logger(__name__)
 
@@ -25,6 +27,7 @@ logger = get_logger(__name__)
 class DocumentService:
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.rag_svc = RagService()
 
     # ── Upload ────────────────────────────────────────────────────────────
 
@@ -94,11 +97,13 @@ class DocumentService:
         # Strip references section
         all_paras = text_cleaner.remove_references_section(parsed["paragraphs"])
 
-        # Re-build sections without references
-        sections = pdf_parser._identify_sections(all_paras)
-
-        # Chunk
-        raw_chunks = chunker.chunk_sections(sections)
+        # Rebuild sections and chunk with section metadata for mind map navigation.
+        section_svc = SectionChunkingService(self.db)
+        _, raw_chunks = await section_svc.identify_and_chunk_sections(
+            str(document.id),
+            all_paras,
+            document.raw_text or "",
+        )
         document.status = "chunked"
 
         # Persist chunks
@@ -109,8 +114,10 @@ class DocumentService:
                 document_id=document.id,
                 chunk_index=raw["chunk_index"],
                 text=raw["text"],
-                section=raw.get("section"),
+                section=raw.get("section_title") or raw.get("section"),
                 token_count=raw["token_count"],
+                section_type=raw.get("section_type"),
+                section_index=raw.get("section_index"),
             )
             if prev_chunk:
                 chunk.prev_chunk_id = prev_chunk.id
@@ -120,6 +127,23 @@ class DocumentService:
             prev_chunk = chunk
 
         await self.db.commit()
+
+        try:
+            await self.rag_svc.index_document_chunks(
+                str(document.id),
+                [
+                    {
+                        "id": chunk.id,
+                        "chunk_index": chunk.chunk_index,
+                        "text": chunk.text,
+                        "section": chunk.section,
+                    }
+                    for chunk in db_chunks
+                ],
+            )
+        except Exception as exc:
+            logger.warning("Document %s chunk indexing skipped: %s", document.id, exc)
+
         document.status = "indexed"
         await self.db.commit()
         logger.info("Document %s processed: %d chunks", document.id, len(db_chunks))

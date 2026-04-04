@@ -28,6 +28,27 @@ export type ChunkPacket = {
   quick_check_questions: Question[]
   progress: ProgressInfo
   can_continue: boolean
+  mode?: string
+  retell_required?: boolean
+}
+
+export type MindMapSubChunk = {
+  chunk_index: number
+  brief_summary: string
+}
+
+export type MindMapSection = {
+  section_index: number
+  section_type: string
+  title: string
+  summary: string
+  chunk_indices: number[]
+  sub_chunks: MindMapSubChunk[]
+}
+
+export type MindMapResponse = {
+  document_id: string
+  sections: MindMapSection[]
 }
 
 export type RetellResult = {
@@ -58,8 +79,14 @@ export const api = {
     request<{ session_id: string; document_id: string; total_chunks: number; current_chunk_index: number }>(
       'POST', '/sessions', { document_id: documentId, user_id: userId }
     ),
+  getMindMap: (sessionId: string) =>
+    request<MindMapResponse>('GET', `/sessions/${sessionId}/mind-map`),
   getCurrentChunk: (sessionId: string) =>
     request<ChunkPacket>('GET', `/sessions/${sessionId}/current`),
+  jumpToSection: (sessionId: string, sectionIndex: number) =>
+    request<{ session_id?: string; jumped_to_chunk?: number; section_index?: number; error?: string }>(
+      'POST', `/sessions/${sessionId}/jump`, { section_index: sectionIndex }
+    ),
   submitRetell: (sessionId: string, text: string) =>
     request<RetellResult>('POST', `/sessions/${sessionId}/retell`, { text }),
   submitQuickCheck: (sessionId: string, answers: { question_id: string; answer: string }[]) =>

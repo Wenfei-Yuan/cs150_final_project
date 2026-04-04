@@ -14,6 +14,7 @@ LLM calls:
   - chunk_quiz_generation: generate T/F, MCQ, or fill-blank question
   - takeaway_feedback: encouraging feedback on user's takeaway
 """
+from __future__ import annotations
 import random
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.llm.client import chat_completion_json

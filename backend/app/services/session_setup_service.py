@@ -3,6 +3,7 @@ Session setup service — handles the 3-question questionnaire and LLM-based mod
 
 LLM call: mode_selection — determines reading mode from user's 3 answers.
 """
+from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.llm.client import chat_completion_json
 from app.llm.parser import parse_and_validate
@@ -10,6 +11,7 @@ from app.schemas.llm_mode import MODE_SELECTION_SCHEMA
 from app.schemas.mode import (
     SETUP_QUESTIONS,
     STRATEGY_PROFILES,
+    ModeChoice,
     ReadingMode,
 )
 from app.core.logger import get_logger
@@ -50,7 +52,8 @@ MODE_DESCRIPTIONS = {
             "sections for you. You only read what matters for your goal. "
             "You can freely jump via the mind map. "
             "At each chunk, a simple yes/no: was this helpful? Plus a quick T/F question. "
-            "At the end, you try to answer your original question and get feedback."
+            "At the end, you say whether you found the target information and then try to answer your "
+            "original question. You get feedback on strengths and limitations, with no score."
         ),
     },
     "deep_comprehension": {
@@ -115,6 +118,27 @@ class SessionSetupService:
         """Return the 3 setup questions."""
         return {"questions": SETUP_QUESTIONS}
 
+    def list_mode_choices(self) -> list[ModeChoice]:
+        """Return the normalized choices for all reading modes."""
+        return [
+            ModeChoice(
+                mode=ReadingMode(mode_key),
+                name=mode_info["name"],
+                description=mode_info["description"],
+            )
+            for mode_key, mode_info in MODE_DESCRIPTIONS.items()
+        ]
+
+    def get_mode_choice(self, mode: str | ReadingMode) -> ModeChoice:
+        """Return the normalized choice object for one mode."""
+        mode_enum = ReadingMode(mode)
+        mode_info = MODE_DESCRIPTIONS[mode_enum.value]
+        return ModeChoice(
+            mode=mode_enum,
+            name=mode_info["name"],
+            description=mode_info["description"],
+        )
+
     async def determine_mode(
         self, reading_purpose: int, available_time: int, support_needed: int
     ) -> dict:
@@ -137,30 +161,26 @@ class SessionSetupService:
         )
 
         data = parse_and_validate(raw, MODE_SELECTION_SCHEMA)
-        recommended = data["mode"]
+        recommended = ReadingMode(data["mode"])
 
-        # Build alternative modes list
-        alternatives = []
-        for mode_key, mode_info in MODE_DESCRIPTIONS.items():
-            if mode_key != recommended:
-                alternatives.append({
-                    "mode": mode_key,
-                    "name": mode_info["name"],
-                    "description": mode_info["description"],
-                })
+        available_modes = [choice.model_dump() for choice in self.list_mode_choices()]
+        alternatives = [
+            choice for choice in available_modes if choice["mode"] != recommended.value
+        ]
 
-        logger.info("LLM recommended mode: %s (reason: %s)", recommended, data["reasoning"])
+        logger.info("LLM recommended mode: %s (reason: %s)", recommended.value, data["reasoning"])
 
         return {
-            "recommended_mode": recommended,
+            "recommended_mode": recommended.value,
             "mode_explanation": data["mode_explanation"],
             "mode_flow_description": data["mode_flow_description"],
             "alternative_modes": alternatives,
+            "available_modes": available_modes,
         }
 
     def get_mode_description(self, mode: str) -> dict:
         """Return the description for a mode."""
-        return MODE_DESCRIPTIONS.get(mode, MODE_DESCRIPTIONS["skim"])
+        return self.get_mode_choice(mode).model_dump()
 
     def get_strategy_profile(self, mode: str):
         """Return the StrategyProfile for a mode."""

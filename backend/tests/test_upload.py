@@ -48,3 +48,28 @@ async def test_upload_happy_path(mock_parser):
         )
     # Without a real DB this will fail at DB level — but the guardrail passes
     assert response.status_code in (200, 500)
+
+
+def test_pdf_parser_preserves_numbered_heading_lines_as_sections():
+    from app.utils.pdf_parser import PDFParser
+
+    parser = PDFParser()
+    raw_text = (
+        "Paper Title\n\n"
+        "1 INTRODUCTION\n"
+        "Intro paragraph line one.\n"
+        "Intro paragraph line two.\n\n"
+        "2 METHODS\n"
+        "Methods paragraph line one.\n"
+        "Methods paragraph line two."
+    )
+
+    paragraphs = parser._split_paragraphs(raw_text)
+    sections = parser._identify_sections(paragraphs)
+
+    assert "1 INTRODUCTION" in paragraphs
+    assert "2 METHODS" in paragraphs
+    assert [section["heading"] for section in sections] == [
+        "1 INTRODUCTION",
+        "2 METHODS",
+    ]

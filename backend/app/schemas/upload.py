@@ -1,6 +1,7 @@
 """
 Schemas for document upload and processing endpoints.
 """
+from __future__ import annotations
 from uuid import UUID
 from datetime import datetime
 from pydantic import BaseModel

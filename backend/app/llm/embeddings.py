@@ -2,6 +2,7 @@
 Embedding helper — uses ChromaDB's built-in local embedding model.
 No external API key required. The default model is all-MiniLM-L6-v2 (ONNX).
 """
+from __future__ import annotations
 import asyncio
 from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 from app.core.logger import get_logger

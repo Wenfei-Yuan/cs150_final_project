@@ -14,6 +14,7 @@ LLM calls:
   - answer_question: answer user questions when they mark "not understood"
   - takeaway_feedback: encouraging feedback on user's takeaway
 """
+from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.llm.client import chat_completion_json
 from app.llm.parser import parse_and_validate

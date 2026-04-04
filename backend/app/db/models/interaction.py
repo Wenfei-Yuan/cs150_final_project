@@ -2,6 +2,7 @@
 Interaction ORM model — records every user-system exchange per chunk.
 """
 import uuid
+from typing import Optional
 from datetime import datetime
 from sqlalchemy import String, Text, Float, Boolean, ForeignKey, DateTime, JSON, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -20,10 +21,10 @@ class Interaction(Base):
     # retell | quick_check | feedback | summary
     interaction_type: Mapped[str] = mapped_column(String(32), nullable=False)
 
-    user_input: Mapped[str | None] = mapped_column(Text)
-    model_output: Mapped[dict | None] = mapped_column(JSON)
-    score: Mapped[float | None] = mapped_column(Float)
-    passed: Mapped[bool | None] = mapped_column(Boolean)
+    user_input: Mapped[Optional[str]] = mapped_column(Text)
+    model_output: Mapped[Optional[dict]] = mapped_column(JSON)
+    score: Mapped[Optional[float]] = mapped_column(Float)
+    passed: Mapped[Optional[bool]] = mapped_column(Boolean)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

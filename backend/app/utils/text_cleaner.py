@@ -1,6 +1,7 @@
 """
 Text cleaning utilities — remove PDF artefacts common in academic papers.
 """
+from __future__ import annotations
 import re
 
 

@@ -3,6 +3,7 @@ Thin async wrapper around the school LLMProxy.
 All LLM calls in the project go through this module, making it easy
 to swap providers later.
 """
+from __future__ import annotations
 import asyncio
 import json
 import re

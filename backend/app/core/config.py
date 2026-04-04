@@ -1,6 +1,8 @@
 """
 Global configuration loaded from environment variables.
 """
+from __future__ import annotations
+from typing import List
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -19,11 +21,11 @@ class Settings(BaseSettings):
     # ── File Storage ──────────────────────────────────────────────────────
     UPLOAD_DIR: str = "uploads"
     MAX_FILE_SIZE_MB: int = 20
-    ALLOWED_EXTENSIONS: list[str] = ["pdf"]
+    ALLOWED_EXTENSIONS: List[str] = ["pdf"]
 
     # ── LLM ───────────────────────────────────────────────────────────────
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-4o-mini"
+    OPENAI_MODEL: str = "4o-mini"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     LLM_TEMPERATURE: float = 0.2
     LLM_MAX_TOKENS: int = 1024

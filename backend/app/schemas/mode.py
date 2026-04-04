@@ -1,6 +1,7 @@
 """
 Schemas for reading modes, strategy profiles, session setup, and mind map.
 """
+from __future__ import annotations
 from enum import Enum
 from uuid import UUID
 from pydantic import BaseModel, Field
@@ -26,7 +27,7 @@ class StrategyProfile:
     gating_mode: str          # none | weak
     chunk_checkpoint: bool
     section_checkpoint: bool  # only if marked undo questions (deep mode)
-    session_checkpoint: str   # takeaway
+    session_checkpoint: str   # takeaway | goal_answer
 
 
 STRATEGY_PROFILES = {
@@ -48,7 +49,7 @@ STRATEGY_PROFILES = {
         gating_mode="none",
         chunk_checkpoint=False,
         section_checkpoint=False,
-        session_checkpoint="takeaway",
+        session_checkpoint="goal_answer",
     ),
     ReadingMode.DEEP_COMPREHENSION: StrategyProfile(
         mode=ReadingMode.DEEP_COMPREHENSION,
@@ -105,16 +106,23 @@ class SetupAnswersRequest(BaseModel):
     support_needed: int = Field(..., ge=0, le=3)
 
 
+class ModeChoice(BaseModel):
+    mode: ReadingMode
+    name: str
+    description: str
+
+
 class ModeSelectionResponse(BaseModel):
     session_id: str
-    recommended_mode: str
+    recommended_mode: ReadingMode
     mode_explanation: str
     mode_flow_description: str
-    alternative_modes: list[dict]  # [{mode, description}]
+    alternative_modes: list[ModeChoice]
+    available_modes: list[ModeChoice]
 
 
 class ModeOverrideRequest(BaseModel):
-    mode: str  # skim | goal_directed | deep_comprehension
+    mode: ReadingMode
 
 
 # ── Mind Map ──────────────────────────────────────────────────────────────────
@@ -198,6 +206,9 @@ class TakeawayRequest(BaseModel):
 
 class TakeawayResponse(BaseModel):
     feedback: str  # Encouraging feedback, no score
+    status: str = "completed"
+    strengths: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 # ── Jump Navigation ──────────────────────────────────────────────────────────

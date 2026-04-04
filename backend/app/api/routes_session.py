@@ -108,7 +108,8 @@ async def override_mode(
 
 # ── Mind Map ───────────────────────────────────────────────────────────────────
 
-@router.get("/{session_id}/mind-map", summary="Get the document mind map")
+@router.get("/{session_id}/mind-map", response_model=MindMapResponse,
+            summary="Get the document mind map")
 async def get_mind_map(
     session_id: str,
     agent: ReadingAgent = Depends(_agent),
@@ -234,7 +235,7 @@ async def quiz_wrong_action(
 # ── Takeaway (all modes — session checkpoint) ────────────────────────────────
 
 @router.post("/{session_id}/takeaway", response_model=TakeawayResponse,
-             summary="Submit final takeaway")
+             summary="Submit final session checkpoint")
 async def submit_takeaway(
     session_id: str,
     payload: TakeawayRequest,

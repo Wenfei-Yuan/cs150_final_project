@@ -4,6 +4,7 @@ Memory service — manages all three memory tiers:
   • Mid-term    : per-document reading history
   • Long-term   : cross-document user profile
 """
+from __future__ import annotations
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_

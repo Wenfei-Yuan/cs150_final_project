@@ -57,6 +57,18 @@ def remember_ids(payload):
         STATE["mode"] = payload["recommended_mode"]
 
 
+def connection_error_payload(exc):
+    return {
+        "error_type": "connection_error",
+        "message": f"Cannot reach the backend at {BASE_URL}.",
+        "details": f"{type(exc).__name__}: {exc}",
+    }
+
+
+def is_connection_error_payload(payload):
+    return isinstance(payload, dict) and payload.get("error_type") == "connection_error"
+
+
 def http_request(method, path, json_body=None, data=None, headers=None):
     url = f"{BASE_URL}{path}"
     req_headers = headers.copy() if headers else {}
@@ -70,14 +82,38 @@ def http_request(method, path, json_body=None, data=None, headers=None):
             return resp.status, parse_body(resp.read())
     except error.HTTPError as e:
         return e.code, parse_body(e.read())
+    except (error.URLError, TimeoutError, ConnectionError) as e:
+        return None, connection_error_payload(e)
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
 
 def print_result(status, payload):
+    if is_connection_error_payload(payload):
+        pretty("Connection Error", payload["message"])
+        pretty("Details", payload["details"])
+        pretty(
+            "Next Steps",
+            "\n".join([
+                "1. Start the backend: python -m uvicorn app.main:app --host 0.0.0.0 --port 8000",
+                "2. Or start the stack: docker compose up --build",
+                f"3. If the backend uses a different address, set DEMO_API_BASE (current: {BASE_URL})",
+            ]),
+        )
+        return
     pretty("HTTP Status", status)
     pretty("Response", payload)
     remember_ids(payload)
+
+
+def ensure_backend_available():
+    status, payload = http_request("GET", "/health")
+    print_result(status, payload)
+    if status == 200:
+        return True
+
+    print("Backend is not ready. Start it, then rerun the demo CLI.\n")
+    return False
 
 
 def prompt_input(text, default=None):
@@ -87,6 +123,100 @@ def prompt_input(text, default=None):
     label += ": "
     value = input(label).strip()
     return value if value else (default or "")
+
+
+def friendly_mode_name(mode):
+    mode_value = getattr(mode, "value", mode)
+    return {
+        "skim": "Skim / Overview Mode",
+        "goal_directed": "Goal-Directed Search Mode",
+        "deep_comprehension": "Deep Comprehension Mode",
+    }.get(mode_value, str(mode_value).replace("_", " ").title())
+
+
+def stringify_mode_text(value, fallback=""):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("description", "mode_flow_description", "mode_explanation", "name", "mode"):
+            nested_value = value.get(key)
+            if isinstance(nested_value, str) and nested_value:
+                return nested_value
+        return fallback
+    if value is None:
+        return fallback
+    return str(getattr(value, "value", value))
+
+
+def normalize_mode_choice(mode_choice, fallback_mode="", fallback_description=""):
+    if not isinstance(mode_choice, dict):
+        return None
+
+    nested_choice = mode_choice.get("description") if isinstance(mode_choice.get("description"), dict) else {}
+    raw_mode = mode_choice.get("mode") or nested_choice.get("mode") or fallback_mode
+    mode = str(getattr(raw_mode, "value", raw_mode or ""))
+    description = stringify_mode_text(mode_choice.get("description"), fallback_description)
+
+    return {
+        "mode": mode,
+        "name": mode_choice.get("name") or nested_choice.get("name") or friendly_mode_name(mode),
+        "description": description,
+    }
+
+
+def unique_mode_choices(mode_choices):
+    choices = []
+    seen_modes = set()
+    for mode_choice in mode_choices:
+        if not mode_choice:
+            continue
+        mode = mode_choice.get("mode", "")
+        if not mode or mode in seen_modes:
+            continue
+        seen_modes.add(mode)
+        choices.append(mode_choice)
+    return choices
+
+
+def truncate_text(text, limit=100):
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def build_mode_choices(response):
+    available_modes = response.get("available_modes")
+    if isinstance(available_modes, list) and available_modes:
+        return unique_mode_choices([
+            normalize_mode_choice(mode_choice)
+            for mode_choice in available_modes
+        ])
+
+    recommended_mode = response.get("recommended_mode")
+    recommended_choice = None
+    if recommended_mode:
+        recommended_choice = normalize_mode_choice({
+            "mode": recommended_mode,
+            "name": friendly_mode_name(recommended_mode),
+            "description": response.get("mode_flow_description") or response.get("mode_explanation", ""),
+        }, fallback_mode=recommended_mode)
+
+    choices = []
+    if recommended_choice:
+        choices.append(recommended_choice)
+
+    for mode_choice in response.get("alternative_modes", []):
+        choices.append(
+            normalize_mode_choice(mode_choice)
+        )
+
+    return unique_mode_choices(choices)
+
+
+def mode_next_step_hint(mode):
+    if mode == "goal_directed":
+        return "  Next step: choose menu 12 to set your goal before reading chunks."
+    return "  Next step: choose menu 5 for the mind map or menu 7 to fetch the current chunk."
 
 
 def encode_multipart(file_field, file_path, extra=None):
@@ -187,21 +317,41 @@ def session_setup():
     if isinstance(resp, dict) and resp.get("recommended_mode"):
         print(f"  Recommended mode: {resp['recommended_mode']}")
         print(f"  Explanation: {resp.get('mode_explanation', '')}")
+        mode_choices = build_mode_choices(resp)
+        recommended_mode = resp["recommended_mode"]
+        selected_mode = recommended_mode
         override = prompt_input("  Accept mode? (y/n)", "y")
         if override.lower() == "n":
-            alt_modes = resp.get("alternative_modes", [])
-            if alt_modes:
-                print("\n  Alternative modes:")
-                for i, m in enumerate(alt_modes):
-                    print(f"    {i}. {m['mode']}: {m['description'][:80]}...")
-                choice = prompt_input("  Choose alternative (number)", "0")
-                idx = int(choice) if choice.isdigit() else 0
-                new_mode = alt_modes[min(idx, len(alt_modes) - 1)]["mode"]
-                status, resp = http_request(
-                    "POST", f"/sessions/{sid}/mode-override",
-                    json_body={"mode": new_mode},
+            if mode_choices:
+                print("\n  Choose one of the three modes:")
+                default_index = next(
+                    (i for i, mode in enumerate(mode_choices) if mode.get("mode") == recommended_mode),
+                    0,
                 )
-                print_result(status, resp)
+                for i, mode_choice in enumerate(mode_choices):
+                    marker = " (recommended)" if mode_choice.get("mode") == recommended_mode else ""
+                    description = stringify_mode_text(mode_choice.get("description", ""))
+                    print(f"    {i}. {mode_choice.get('name', friendly_mode_name(mode_choice.get('mode', '')))} [{mode_choice.get('mode', '')}]{marker}")
+                    if description:
+                        print(f"       {truncate_text(description)}")
+                choice = prompt_input("  Choose mode (number)", str(default_index))
+                idx = int(choice) if choice.isdigit() else default_index
+                idx = min(max(idx, 0), len(mode_choices) - 1)
+                selected_mode = mode_choices[idx]["mode"]
+            else:
+                print("  No mode choices were returned. Keeping the recommended mode.")
+
+        if selected_mode != recommended_mode:
+            status, resp = http_request(
+                "POST", f"/sessions/{sid}/mode-override",
+                json_body={"mode": selected_mode},
+            )
+            print_result(status, resp)
+        else:
+            print("  Keeping the recommended mode.")
+
+        print(f"  Selected mode: {selected_mode}")
+        print(mode_next_step_hint(selected_mode))
 
 
 # ── Step 3: Mind Map ──────────────────────────────────────────────────────────
@@ -380,7 +530,14 @@ def submit_takeaway():
     sid = STATE["session_id"]
     if not sid:
         sid = prompt_input("session_id")
-    text = input("Your takeaway from this reading session:\n> ").strip()
+    mode = STATE.get("mode")
+    if mode == "goal_directed":
+        prompt = (
+            "Did you extract the goal information? Try answering your original question:\n> "
+        )
+    else:
+        prompt = "Your takeaway from this reading session:\n> "
+    text = input(prompt).strip()
     status, resp = http_request("POST", f"/sessions/{sid}/takeaway", json_body={"text": text})
     print_result(status, resp)
 
@@ -474,7 +631,8 @@ def main():
     print()
     print("Starting Mode-Aware Demo CLI...")
     print()
-    health_check()
+    if not ensure_backend_available():
+        sys.exit(1)
 
     handlers = {
         "1": health_check,

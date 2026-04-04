@@ -1,6 +1,7 @@
 """
 Chunk service — CRUD helpers around the Chunk model.
 """
+from __future__ import annotations
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_

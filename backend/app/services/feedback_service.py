@@ -1,6 +1,7 @@
 """
 Feedback service — evaluates user retells and quick-check answers via LLM judge.
 """
+from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.chunk import Chunk
 from app.llm.client import chat_completion_json
