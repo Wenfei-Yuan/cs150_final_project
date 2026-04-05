@@ -335,10 +335,10 @@ async def test_generate_mind_map_prefers_explicit_subsection_titles(mock_chat_co
     )
 
     assert [sub["brief_summary"] for sub in result["sections"][0]["sub_chunks"]] == [
-        "2.1 Prior Models",
-        "2.2 Retrieval Methods",
-        "2.3 Interface Studies",
-        "2.4 Accessibility Research",
+        "Prior Models",
+        "Retrieval Methods",
+        "Interface Studies",
+        "Accessibility Research",
     ]
 
 

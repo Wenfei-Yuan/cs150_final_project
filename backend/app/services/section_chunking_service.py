@@ -848,12 +848,11 @@ class SectionChunkingService:
         if not text:
             return f"Chunk {chunk_index}"
 
-        if re.match(r"^\d+(?:\.\d+)+\s+\S", text):
-            words = text.split()
-            if len(words) > 6:
-                text = " ".join(words[:6])
-            if len(text) > 48:
-                text = text[:45].rstrip() + "..."
+        # For numbered subsection headings (e.g. "2.1 Writers with Dyslexia"),
+        # strip the number prefix and use the heading text as the label.
+        numbered = re.match(r"^\d+(?:\.\d+)+\s+(.+)", text)
+        if numbered:
+            text = numbered.group(1).strip()
             return text or f"Chunk {chunk_index}"
 
         text = text.rstrip(".?!;:，。！？；：")

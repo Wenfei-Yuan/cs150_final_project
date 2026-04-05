@@ -150,18 +150,16 @@ class Chunker:
             preserve_group = bool(group.get("preserve_group"))
 
             if preserve_group:
-                group_text = "\n\n".join(paragraphs)
-                if _estimate_tokens(group_text) <= self.max_tokens:
-                    chunk = self._make_chunk(paragraphs, section)
-                    chunk["semantic_group_title"] = group_title
-                    chunk["semantic_group_rationale"] = group_rationale
-                    chunks.append(chunk)
-                    continue
+                chunk = self._make_chunk(paragraphs, section)
+                chunk["semantic_group_title"] = group_title
+                chunk["semantic_group_rationale"] = group_rationale
+                chunks.append(chunk)
+                continue
 
             for sub_chunk in self._chunk_paragraph_sequence(
                 paragraphs,
                 section=section,
-                allow_short_merge=not preserve_group,
+                allow_short_merge=True,
             ):
                 sub_chunk["semantic_group_title"] = group_title
                 sub_chunk["semantic_group_rationale"] = group_rationale
