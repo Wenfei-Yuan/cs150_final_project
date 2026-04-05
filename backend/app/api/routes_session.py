@@ -14,8 +14,6 @@ from app.schemas.reading import (
     ChunkPacketResponse,
     RetellRequest as LegacyRetellRequest,
     RetellFeedbackResponse,
-    QuickCheckRequest,
-    QuickCheckResponse,
     ProgressResponse,
 )
 from app.schemas.mode import (
@@ -246,26 +244,23 @@ async def submit_takeaway(
 
 # ── Jump Navigation ──────────────────────────────────────────────────────────
 
-@router.post("/{session_id}/jump", summary="Jump to a section (skim/goal-directed)")
+@router.post("/{session_id}/jump", summary="Jump to a section or chunk")
 async def jump_to_section(
     session_id: str,
     payload: JumpToSectionRequest,
     agent: ReadingAgent = Depends(_agent),
 ):
-    return await agent.jump_to_section(session_id, payload.section_index)
+    return await agent.jump_to_section(
+        session_id, payload.section_index, chunk_index=payload.chunk_index
+    )
 
 
-# ── Quick Check (legacy — still used) ─────────────────────────────────────────
-
-@router.post("/{session_id}/quick-check", response_model=QuickCheckResponse,
-             summary="Submit answers to quick-check questions")
-async def submit_quick_check(
+@router.post("/{session_id}/jump-back", summary="Return to the reading line after a jump")
+async def jump_back(
     session_id: str,
-    payload: QuickCheckRequest,
     agent: ReadingAgent = Depends(_agent),
 ):
-    answers = [a.model_dump() for a in payload.answers]
-    return await agent.handle_quick_check(session_id, answers)
+    return await agent.jump_back(session_id)
 
 
 # ── Advance to next chunk ──────────────────────────────────────────────────────

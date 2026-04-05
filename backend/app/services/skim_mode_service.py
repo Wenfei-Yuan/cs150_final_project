@@ -24,7 +24,7 @@ from app.core.logger import get_logger
 logger = get_logger(__name__)
 
 # Mainline section types for skim mode
-SKIM_MAINLINE_SECTIONS = ["abstract", "introduction", "figures_tables", "results"]
+SKIM_MAINLINE_SECTIONS = ["abstract", "introduction", "methods", "results"]
 
 _FULL_SUMMARY_SYSTEM = (
     "You are an expert reading assistant. "
@@ -103,7 +103,7 @@ class SkimModeService:
     def get_reading_order(self, sections_meta: list[dict], all_chunks: list[dict]) -> list[int]:
         """
         Build the mainline reading order for skim mode.
-        Only include chunks from: abstract, introduction, figures_tables, results.
+        Only include chunks from: abstract, introduction, methods, results.
         """
         mainline_chunks = []
         for sec in sections_meta:

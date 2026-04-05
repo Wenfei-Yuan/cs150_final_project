@@ -645,6 +645,18 @@ class ReadingAgent:
         else:
             packet["retell_required"] = False
 
+        # Expose jump-return info so frontend can show "Return" button
+        reading_order = session.reading_order
+        on_reading_line = (
+            reading_order is None
+            or chunk.chunk_index in reading_order
+        )
+        packet["jump_return_index"] = (
+            session.jump_return_index
+            if not on_reading_line and session.jump_return_index is not None
+            else None
+        )
+
         return packet
 
     # ── Self-Assess (skim mode) ───────────────────────────────────────────
@@ -832,10 +844,22 @@ class ReadingAgent:
 
         return response
 
-    # ── Jump to section (skim / goal-directed) ────────────────────────────
+    # ── Jump to section / chunk ──────────────────────────────────────────────────
 
-    async def jump_to_section(self, session_id: str, section_index: int) -> dict:
-        """Jump to the first chunk of a given section."""
+    async def jump_to_section(
+        self,
+        session_id: str,
+        section_index: int,
+        *,
+        chunk_index: int | None = None,
+    ) -> dict:
+        """
+        Jump navigation — behaviour varies by mode:
+        • skim / goal_directed: can jump to any chunk within any section
+          (if chunk_index is given, jump there; otherwise first chunk)
+        • deep_comprehension: always jumps to the first chunk of the section
+          (chunk_index is ignored)
+        """
         session = await self.memory_svc.get_session(session_id)
 
         # Save current position for potential return
@@ -849,12 +873,28 @@ class ReadingAgent:
         if not target_section or not target_section.get("chunk_indices"):
             return {"error": f"No chunks found for section {section_index}."}
 
-        first_chunk_index = target_section["chunk_indices"][0]
-        chunk = await self.chunk_svc.get_chunk_by_index(session.document_id, first_chunk_index)
+        is_deep = session.mode == "deep_comprehension"
+
+        if chunk_index is not None and not is_deep:
+            # skim / goal-directed: jump to the requested chunk
+            if chunk_index not in target_section["chunk_indices"]:
+                return {
+                    "error": f"Chunk {chunk_index} does not belong to section {section_index}.",
+                }
+            target_chunk_index = chunk_index
+        else:
+            # deep mode or no chunk specified: always first chunk of section
+            target_chunk_index = target_section["chunk_indices"][0]
+
+        chunk = await self.chunk_svc.get_chunk_by_index(
+            session.document_id, target_chunk_index
+        )
 
         session.current_chunk_index = chunk.chunk_index
         session.current_section_index = section_index
-        session.unlocked_chunk_index = max(session.unlocked_chunk_index, chunk.chunk_index)
+        session.unlocked_chunk_index = max(
+            session.unlocked_chunk_index, chunk.chunk_index
+        )
         await self.db.commit()
         await self.db.refresh(session)
 
@@ -862,6 +902,32 @@ class ReadingAgent:
             "session_id": str(session.id),
             "jumped_to_chunk": chunk.chunk_index,
             "section_index": section_index,
+        }
+
+
+    # ── Jump back to reading line ──────────────────────────────────────────────
+
+    async def jump_back(self, session_id: str) -> dict:
+        """Return to the position saved before the last jump."""
+        session = await self.memory_svc.get_session(session_id)
+
+        if session.jump_return_index is None:
+            return {"error": "No jump to return from."}
+
+        # Check if already on the reading line
+        reading_order = session.reading_order
+        if reading_order and session.current_chunk_index in reading_order:
+            return {"error": "Already on the reading line."}
+
+        target = session.jump_return_index
+        session.current_chunk_index = target
+        session.jump_return_index = None  # Clear after use
+        await self.db.commit()
+        await self.db.refresh(session)
+
+        return {
+            "session_id": str(session.id),
+            "returned_to_chunk": target,
         }
 
     # ── Advance to next chunk ─────────────────────────────────────────────
@@ -875,13 +941,30 @@ class ReadingAgent:
             # Follow the reading order
             try:
                 current_pos = reading_order.index(session.current_chunk_index)
+            except ValueError:
+                # Current chunk is not in reading_order (e.g. after a jump).
+                # Find the next entry in reading_order that comes after the
+                # current chunk index so we re-join the curated path.
+                current_pos = None
+                cur = session.current_chunk_index
+                for i, ro_idx in enumerate(reading_order):
+                    if ro_idx > cur:
+                        current_pos = i - 1  # so +1 below lands on i
+                        break
+                if current_pos is None:
+                    # Past all entries in reading_order — mark completed
+                    session.status = "completed"
+
+            if session.status != "completed" and current_pos is not None:
                 if current_pos + 1 < len(reading_order):
-                    session.current_chunk_index = reading_order[current_pos + 1]
+                    next_idx = reading_order[current_pos + 1]
+                    session.current_chunk_index = next_idx
+                    # Keep unlocked_chunk_index in sync so the lock check passes
+                    session.unlocked_chunk_index = max(
+                        session.unlocked_chunk_index, next_idx
+                    )
                 else:
                     session.status = "completed"
-            except ValueError:
-                # Current chunk not in reading order — advance normally
-                session = await self.memory_svc.advance_current_chunk(session_id)
         else:
             session = await self.memory_svc.advance_current_chunk(session_id)
 

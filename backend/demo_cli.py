@@ -425,7 +425,7 @@ def self_assess():
     print_result(status, resp)
 
     if not understood:
-        question = prompt_input("What would you like to know?", "")
+        question = prompt_input("Which parts are unclear? I'd be happy to help explain.", "")
         if question:
             status, resp = http_request("POST", f"/sessions/{sid}/ask-question", json_body={"question": question})
             print_result(status, resp)
@@ -488,40 +488,6 @@ def get_quiz():
             status3, resp3 = http_request("POST", f"/sessions/{sid}/quiz-action",
                                            json_body={"action": action})
             print_result(status3, resp3)
-
-
-def submit_quick_check():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-
-    # Fetch questions from the current chunk
-    print("\nFetching questions for current chunk...")
-    q_status, q_resp = http_request("GET", f"/sessions/{sid}/current")
-    questions = []
-    if isinstance(q_resp, dict):
-        questions = q_resp.get("quick_check_questions", [])
-
-    if not questions:
-        print("\nNo questions found for this chunk.\n")
-        return
-
-    print(f"\n  {len(questions)} question(s) found:\n")
-    answers = []
-    for i, q in enumerate(questions, 1):
-        qid = q.get("id", f"q{i}")
-        qtype = q.get("question_type", "")
-        qtext = q.get("question", "")
-        print(f"  Q{i} [{qtype}]: {qtext}")
-        ans = input("  Your answer: ").strip()
-        if not ans:
-            ans = "(skipped)"
-        answers.append({"question_id": qid, "answer": ans})
-        print()
-
-    status, resp = http_request("POST", f"/sessions/{sid}/quick-check",
-                                 json_body={"answers": answers})
-    print_result(status, resp)
 
 
 # ── Takeaway (all modes) ─────────────────────────────────────────────────────
@@ -612,14 +578,13 @@ def print_menu():
     print("  13. [goal] Helpful check")
     print("  14. [deep] Submit retell")
     print("  15. [deep] Quiz (get + answer)")
-    print("  16. [deep] Quick-check (legacy)")
     print()
     print("  ── Step 5: Wrap Up ──")
-    print("  17. Submit takeaway")
-    print("  18. Show progress")
-    print("  19. Show history")
-    print("  20. Show user memory")
-    print("  21. Custom request")
+    print("  16. Submit takeaway")
+    print("  17. Show progress")
+    print("  18. Show history")
+    print("  19. Show user memory")
+    print("  20. Custom request")
     print("  0.  Exit")
     print("-" * 60)
     print(f"  doc={STATE['document_id']}  session={STATE['session_id']}  "
@@ -650,12 +615,11 @@ def main():
         "13": goal_check,
         "14": submit_retell,
         "15": get_quiz,
-        "16": submit_quick_check,
-        "17": submit_takeaway,
-        "18": show_progress,
-        "19": show_history,
-        "20": show_user_memory,
-        "21": custom_request,
+        "16": submit_takeaway,
+        "17": show_progress,
+        "18": show_history,
+        "19": show_user_memory,
+        "20": custom_request,
     }
 
     while True:

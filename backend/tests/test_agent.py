@@ -35,45 +35,6 @@ async def test_handle_retell_too_short(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_quick_check_unlocks_chunk():
-    """Passing quick-check should call unlock_next_chunk."""
-    from app.agents.reading_agent import ReadingAgent
-
-    db = AsyncMock()
-    agent = ReadingAgent(db)
-
-    session = MagicMock()
-    session.user_id = "u1"
-    session.document_id = uuid4()
-    session.current_chunk_index = 0
-    session.unlocked_chunk_index = 0
-
-    chunk = MagicMock()
-    chunk.id = uuid4()
-    chunk.chunk_index = 0
-    chunk.text = "Sample passage text " * 20
-
-    agent.memory_svc.get_session = AsyncMock(return_value=session)
-    agent.chunk_svc.get_current_chunk = AsyncMock(return_value=chunk)
-    agent.feedback_svc.evaluate_answers = AsyncMock(return_value={
-        "pass": True,
-        "score": 0.8,
-        "results": [{"question_id": "q1", "correct": True, "explanation": "Correct!"}],
-        "feedback_text": "Well done!",
-    })
-    agent.memory_svc.save_interaction = AsyncMock()
-    agent.memory_svc.unlock_next_chunk = AsyncMock()
-
-    result = await agent.handle_quick_check(
-        str(uuid4()),
-        [{"question_id": "q1", "question": "What is the main idea?", "answer": "The model uses attention."}],
-    )
-
-    assert result["pass"] is True
-    agent.memory_svc.unlock_next_chunk.assert_called_once()
-
-
-@pytest.mark.asyncio
 async def test_get_mind_map_rebuilds_sections_for_legacy_chunks():
     """Mind map generation should work for older documents without persisted section metadata."""
     from app.agents.reading_agent import ReadingAgent
@@ -461,28 +422,28 @@ async def test_jump_to_section_uses_rebuilt_sections_and_unlocks_target():
     session.current_chunk_index = 0
     session.current_section_index = 0
     session.unlocked_chunk_index = 0
-
-    chunk = MagicMock()
-    chunk.chunk_index = 4
+    session.mode = "skim"
+    session.status = "active"
 
     agent.memory_svc.get_session = AsyncMock(return_value=session)
-    agent._get_all_chunks_meta = AsyncMock(return_value=[
-        {
-            "chunk_index": 0,
-            "text": "Abstract chunk",
-            "section": "Abstract",
-            "section_type": None,
-            "section_index": None,
-        },
-        {
-            "chunk_index": 4,
-            "text": "Methods chunk",
-            "section": "Methods",
-            "section_type": None,
-            "section_index": None,
-        },
+
+    # Two sections: section 0 = chunks [0,1,2,3], section 1 = chunks [4,5,6]
+    chunks_meta = [
+        {"chunk_index": i, "text": f"chunk {i}", "section": None,
+         "section_type": None, "section_index": None}
+        for i in range(7)
+    ]
+    agent._get_all_chunks_meta = AsyncMock(return_value=chunks_meta)
+    agent._get_sections_meta = AsyncMock(return_value=[
+        {"section_type": "other", "section_index": 0, "title": "Preamble",
+         "chunk_indices": [0, 1, 2, 3]},
+        {"section_type": "introduction", "section_index": 1, "title": "Intro",
+         "chunk_indices": [4, 5, 6]},
     ])
-    agent.chunk_svc.get_chunk_by_index = AsyncMock(return_value=chunk)
+
+    target_chunk = MagicMock()
+    target_chunk.chunk_index = 4
+    agent.chunk_svc.get_chunk_by_index = AsyncMock(return_value=target_chunk)
 
     result = await agent.jump_to_section(str(uuid4()), 1)
 
@@ -527,7 +488,6 @@ async def test_get_chunk_packet_includes_goal_context():
 
     assert result["mode"] == "goal_directed"
     assert result["user_goal"] == "Find the paper's method"
-    assert result["quick_check_questions"] == []
 
 
 @pytest.mark.asyncio
@@ -582,3 +542,138 @@ async def test_handle_takeaway_goal_mode_returns_structured_feedback():
     assert call["goal"] == "What method does the paper use?"
     assert call["answer_text"] == "Yes. They used interviews."
     assert call["sections_read"] == "Introduction, Methods"
+
+
+# ── Jump to chunk tests ──────────────────────────────────────────────────────
+
+def _make_jump_agent():
+    """Helper: build an agent with a 2-section document (3 chunks each)."""
+    from app.agents.reading_agent import ReadingAgent
+
+    db = AsyncMock()
+    agent = ReadingAgent(db)
+
+    session = MagicMock()
+    session.id = uuid4()
+    session.document_id = uuid4()
+    session.current_chunk_index = 0
+    session.current_section_index = 0
+    session.unlocked_chunk_index = 0
+
+    agent.memory_svc.get_session = AsyncMock(return_value=session)
+    agent._get_all_chunks_meta = AsyncMock(return_value=[
+        {"chunk_index": i, "text": f"chunk {i}", "section": sec,
+         "section_type": None, "section_index": None}
+        for i, sec in enumerate(["Intro", "Intro", "Intro", "Methods", "Methods", "Methods"])
+    ])
+
+    def _make_chunk(doc_id, idx):
+        c = MagicMock()
+        c.chunk_index = idx
+        return c
+
+    agent.chunk_svc.get_chunk_by_index = AsyncMock(side_effect=_make_chunk)
+    return agent, session
+
+
+@pytest.mark.asyncio
+async def test_jump_to_chunk_skim_mode():
+    """Skim mode should allow jumping to any chunk within a section."""
+    agent, session = _make_jump_agent()
+    session.mode = "skim"
+
+    result = await agent.jump_to_section(str(uuid4()), 1, chunk_index=4)
+
+    assert result["jumped_to_chunk"] == 4
+    assert session.current_chunk_index == 4
+    assert session.current_section_index == 1
+
+
+@pytest.mark.asyncio
+async def test_jump_to_chunk_goal_directed_mode():
+    """Goal-directed mode should allow jumping to any chunk within a section."""
+    agent, session = _make_jump_agent()
+    session.mode = "goal_directed"
+
+    result = await agent.jump_to_section(str(uuid4()), 1, chunk_index=5)
+
+    assert result["jumped_to_chunk"] == 5
+    assert session.current_chunk_index == 5
+
+
+@pytest.mark.asyncio
+async def test_jump_to_chunk_deep_mode_ignores_chunk_index():
+    """Deep comprehension mode should ignore chunk_index and jump to section start."""
+    agent, session = _make_jump_agent()
+    session.mode = "deep_comprehension"
+
+    result = await agent.jump_to_section(str(uuid4()), 1, chunk_index=5)
+
+    # Should jump to first chunk of section 1 (chunk 3), not chunk 5
+    assert result["jumped_to_chunk"] == 3
+    assert session.current_chunk_index == 3
+
+
+@pytest.mark.asyncio
+async def test_jump_to_chunk_wrong_section_returns_error():
+    """Jumping to a chunk that doesn't belong to the section should error."""
+    agent, session = _make_jump_agent()
+    session.mode = "skim"
+
+    result = await agent.jump_to_section(str(uuid4()), 0, chunk_index=4)
+
+    assert "error" in result
+    assert "does not belong" in result["error"]
+
+
+# ── jump_back tests ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_jump_back_returns_to_saved_position():
+    """jump_back should restore the saved jump_return_index."""
+    agent, session = _make_jump_agent()
+    session.mode = "skim"
+    session.reading_order = [0, 1, 2]
+
+    # Simulate: user was at chunk 1, jumped to chunk 4 (not in reading_order)
+    session.current_chunk_index = 4
+    session.jump_return_index = 1
+
+    result = await agent.jump_back(str(uuid4()))
+
+    assert result["returned_to_chunk"] == 1
+    assert session.current_chunk_index == 1
+    assert session.jump_return_index is None  # cleared after use
+
+
+@pytest.mark.asyncio
+async def test_jump_back_already_on_reading_line():
+    """jump_back when already on the reading line should return error."""
+    agent, session = _make_jump_agent()
+    session.mode = "skim"
+    session.reading_order = [0, 1, 2, 3, 4, 5]
+
+    # On the reading line but with a stale jump_return_index
+    session.current_chunk_index = 2
+    session.jump_return_index = 0
+
+    result = await agent.jump_back(str(uuid4()))
+
+    assert "error" in result
+    assert "Already on the reading line" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_jump_back_no_saved_position():
+    """jump_back with no jump_return_index should return error."""
+    agent, session = _make_jump_agent()
+    session.mode = "skim"
+    session.reading_order = [0, 1, 2]
+
+    session.current_chunk_index = 1
+    session.jump_return_index = None
+
+    result = await agent.jump_back(str(uuid4()))
+
+    assert "error" in result
+    assert "No jump to return from" in result["error"]

@@ -127,13 +127,6 @@ def main():
         # Step 8: Submit retell
         ok, payload = step("Submit retell", *http_request("POST", f"/sessions/{session_id}/retell", json_body={"text": "This paper discusses ADHD and its effects on reading comprehension in students."}))
 
-        # Step 9: Quick check
-        ok, payload = step("Quick check (get questions)", *http_request("GET", f"/sessions/{session_id}/current"))
-        questions = payload.get("quick_check_questions", []) if isinstance(payload, dict) else []
-        if questions:
-            answers_list = [{"question_id": q.get("id", f"q{i}"), "answer": "True"} for i, q in enumerate(questions, 1)]
-            ok, payload = step("Submit quick check", *http_request("POST", f"/sessions/{session_id}/quick-check", json_body={"answers": answers_list}))
-
     elif mode == "skim":
         # Get full summary
         ok, payload = step("Full summary", *http_request("GET", f"/sessions/{session_id}/full-summary"))

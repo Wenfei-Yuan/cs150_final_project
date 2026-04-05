@@ -215,3 +215,4 @@ class TakeawayResponse(BaseModel):
 
 class JumpToSectionRequest(BaseModel):
     section_index: int
+    chunk_index: int | None = None  # If provided, jump to this specific chunk

@@ -162,6 +162,9 @@ class DeepComprehensionModeService:
         correct = question["correct_answer"].strip().lower()
         answer = user_answer.strip().lower()
 
+        if not answer:
+            return False
+
         if question["question_type"] == "true_false":
             return answer in correct or correct in answer
         elif question["question_type"] == "multiple_choice":

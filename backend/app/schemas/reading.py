@@ -1,5 +1,5 @@
 """
-Schemas for the reading flow (session, chunk, retell, quick check).
+Schemas for the reading flow (session, chunk, retell).
 """
 from __future__ import annotations
 from uuid import UUID
@@ -30,12 +30,6 @@ class KeyTerm(BaseModel):
     note: str
 
 
-class QuickCheckQuestion(BaseModel):
-    id: str
-    question: str
-    question_type: str   # main_idea | comparison | assumption | evidence | implication
-
-
 class ProgressInfo(BaseModel):
     current: int
     total: int
@@ -49,7 +43,6 @@ class ChunkPacketResponse(BaseModel):
     text: str
     annotated_summary: list[str]
     key_terms: list[KeyTerm]
-    quick_check_questions: list[QuickCheckQuestion]
     progress: ProgressInfo
     can_continue: bool = False
     mode: str | None = None
@@ -69,30 +62,6 @@ class RetellFeedbackResponse(BaseModel):
     covered_points: list[str]
     missing_points: list[str]
     misconceptions: list[str]
-    feedback_text: str
-
-
-# ── Quick Check ───────────────────────────────────────────────────────────────
-
-class AnswerItem(BaseModel):
-    question_id: str
-    answer: str
-
-
-class QuickCheckRequest(BaseModel):
-    answers: list[AnswerItem]
-
-
-class QuickCheckResultItem(BaseModel):
-    question_id: str
-    correct: bool
-    explanation: str
-
-
-class QuickCheckResponse(BaseModel):
-    passed: bool
-    score: float
-    results: list[QuickCheckResultItem]
     feedback_text: str
 
 
