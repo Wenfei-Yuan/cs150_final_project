@@ -1,9 +1,11 @@
 from urllib import error
 
 from demo_cli import (
+    build_learning_test_submit_request,
     build_mode_choices,
     ensure_backend_available,
     http_request,
+    normalize_learning_test_answer,
     normalize_mode_choice,
     print_result,
 )
@@ -105,4 +107,40 @@ def test_normalize_mode_choice_keeps_current_payload_shape():
         "mode": "skim",
         "name": "Skim / Overview Mode",
         "description": "Quick overview of the paper.",
+    }
+
+
+def test_normalize_learning_test_answer_accepts_letter_and_index():
+    assert normalize_learning_test_answer("a") == "A"
+    assert normalize_learning_test_answer("B") == "B"
+    assert normalize_learning_test_answer("0") == "A"
+    assert normalize_learning_test_answer("3") == "D"
+    assert normalize_learning_test_answer("x") == ""
+
+
+def test_build_learning_test_submit_request_keeps_schema_shape():
+    payload = build_learning_test_submit_request(
+        document_id="doc-1",
+        user_id="1",
+        questions=[{
+            "id": "q1",
+            "question": "Question?",
+            "difficulty": "easy",
+            "options": ["A.1", "B.2", "C.3", "D.4"],
+            "correct_answer": "A",
+        }],
+        answers=[{"question_id": "q1", "selected": "B"}],
+    )
+
+    assert payload == {
+        "document_id": "doc-1",
+        "user_id": "1",
+        "questions": [{
+            "id": "q1",
+            "question": "Question?",
+            "difficulty": "easy",
+            "options": ["A.1", "B.2", "C.3", "D.4"],
+            "correct_answer": "A",
+        }],
+        "answers": [{"question_id": "q1", "selected": "B"}],
     }

@@ -22,6 +22,7 @@ STATE = {
     "session_id": None,
     "user_id": "1",
     "mode": None,
+    "learning_test_questions": [],
 }
 
 
@@ -182,6 +183,27 @@ def truncate_text(text, limit=100):
     if len(text) <= limit:
         return text
     return f"{text[:limit]}..."
+
+
+def normalize_learning_test_answer(choice):
+    value = str(choice).strip().upper()
+    if value in ("A", "B", "C", "D"):
+        return value
+    return {
+        "0": "A",
+        "1": "B",
+        "2": "C",
+        "3": "D",
+    }.get(value, "")
+
+
+def build_learning_test_submit_request(document_id, user_id, questions, answers):
+    return {
+        "document_id": str(document_id),
+        "user_id": str(user_id),
+        "questions": questions,
+        "answers": answers,
+    }
 
 
 def build_mode_choices(response):
@@ -508,6 +530,54 @@ def submit_takeaway():
     print_result(status, resp)
 
 
+# ── Learning Test (independent) ──────────────────────────────────────────────
+
+def generate_learning_test():
+    did = STATE["document_id"] or prompt_input("document_id")
+    uid = prompt_input("user_id", str(STATE["user_id"] or "1"))
+    status, resp = http_request(
+        "POST",
+        "/learning-test/generate",
+        json_body={"document_id": did, "user_id": uid},
+    )
+    print_result(status, resp)
+    if isinstance(resp, dict) and isinstance(resp.get("questions"), list):
+        STATE["learning_test_questions"] = resp["questions"]
+        print(f"Loaded {len(resp['questions'])} learning-test questions into CLI state.")
+
+
+def submit_learning_test():
+    did = STATE["document_id"] or prompt_input("document_id")
+    uid = prompt_input("user_id", str(STATE["user_id"] or "1"))
+    questions = STATE.get("learning_test_questions") or []
+
+    if not questions:
+        print("\nNo learning-test questions in state. Run menu 21 first.\n")
+        return
+
+    answers = []
+    print("\n" + "=" * 50)
+    print("  LEARNING TEST — Submit Your Answers")
+    print("=" * 50)
+
+    for q in questions:
+        print(f"\n[{q.get('id', '?')}] {q.get('difficulty', 'unknown').upper()} - {q.get('question', '')}")
+        options = q.get("options", [])
+        for i, option in enumerate(options):
+            print(f"  {i}. {option}")
+        while True:
+            raw = prompt_input("  Your answer (A-D or 0-3)", "A")
+            selected = normalize_learning_test_answer(raw)
+            if selected:
+                answers.append({"question_id": q.get("id"), "selected": selected})
+                break
+            print("  Please enter A, B, C, D, or 0, 1, 2, 3.")
+
+    payload = build_learning_test_submit_request(did, uid, questions, answers)
+    status, resp = http_request("POST", "/learning-test/submit", json_body=payload)
+    print_result(status, resp)
+
+
 # ── Other ─────────────────────────────────────────────────────────────────────
 
 def show_progress():
@@ -585,6 +655,10 @@ def print_menu():
     print("  18. Show history")
     print("  19. Show user memory")
     print("  20. Custom request")
+    print()
+    print("  ── Learning Test ──")
+    print("  21. Generate learning test (9 MCQs)")
+    print("  22. Submit learning test answers")
     print("  0.  Exit")
     print("-" * 60)
     print(f"  doc={STATE['document_id']}  session={STATE['session_id']}  "
@@ -620,6 +694,8 @@ def main():
         "18": show_history,
         "19": show_user_memory,
         "20": custom_request,
+        "21": generate_learning_test,
+        "22": submit_learning_test,
     }
 
     while True:
