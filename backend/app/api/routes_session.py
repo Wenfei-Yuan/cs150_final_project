@@ -26,6 +26,7 @@ from app.schemas.mode import (
     SetGoalRequest,
     GoalCheckRequest,
     ChunkQuizAnswerRequest,
+    SectionQuizAnswerRequest,
     MarkForRetryRequest,
     RetellRequest,
     TakeawayRequest,
@@ -204,17 +205,37 @@ async def get_quiz(
 @router.post("/{session_id}/quiz-answer", summary="Submit quiz answer (deep mode)")
 async def submit_quiz_answer(
     session_id: str,
-    payload: ChunkQuizAnswerRequest,
+    payload: SectionQuizAnswerRequest,
     agent: ReadingAgent = Depends(_agent),
 ):
-    # Generate a fresh quiz question for the current chunk and check
+    """Submit answers for section quiz (2 questions). Checks each answer."""
     quiz_data = await agent.handle_chunk_quiz(session_id)
-    question = quiz_data["question"]
-    return await agent.handle_quiz_answer(
-        session_id,
-        question=question,
-        user_answer=payload.answer,
-    )
+    questions = quiz_data["questions"]
+
+    results = []
+    all_correct = True
+    for q in questions:
+        # Find user's answer for this question
+        user_ans = ""
+        for a in payload.answers:
+            if a.get("question_id") == q["id"]:
+                user_ans = a.get("answer", "")
+                break
+
+        result = await agent.handle_quiz_answer(session_id, question=q, user_answer=user_ans)
+        results.append({
+            "question_id": q["id"],
+            "correct": result["correct"],
+            "explanation": result["explanation"],
+        })
+        if not result["correct"]:
+            all_correct = False
+
+    return {
+        "all_correct": all_correct,
+        "results": results,
+        "options_on_wrong": [] if all_correct else ["retry", "mark_for_later", "skip"],
+    }
 
 
 @router.post("/{session_id}/quiz-action", summary="Handle quiz wrong answer action (deep mode)")

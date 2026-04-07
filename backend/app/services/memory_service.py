@@ -84,6 +84,18 @@ class MemoryService:
         await self.db.refresh(session)
         return session
 
+    async def unlock_up_to_chunk(self, session_id: str, chunk_index: int) -> ReadingSession:
+        """Unlock all chunks up to the given chunk_index (inclusive)."""
+        session = await self._get_session_for_update(session_id)
+        target = min(chunk_index, session.total_chunks - 1)
+        if target > session.unlocked_chunk_index:
+            session.unlocked_chunk_index = target
+        if session.unlocked_chunk_index >= session.total_chunks - 1:
+            session.status = "completed"
+        await self.db.commit()
+        await self.db.refresh(session)
+        return session
+
     async def force_advance_chunk(self, session_id: str) -> ReadingSession:
         """Force-advance regardless of lock state (skip/dev use)."""
         session = await self._get_session_for_update(session_id)
@@ -103,14 +115,17 @@ class MemoryService:
         return session
 
     async def mark_chunk_for_retry_and_unlock(
-        self, session_id: str, chunk_index: int
+        self, session_id: str, chunk_index: int, unlock_up_to: int | None = None,
     ) -> ReadingSession:
         session = await self._get_session_for_update(session_id)
         marked = list(session.marked_for_retry or [])
         if chunk_index not in marked:
             marked.append(chunk_index)
             session.marked_for_retry = marked
-        if session.unlocked_chunk_index < session.total_chunks - 1:
+        if unlock_up_to is not None:
+            target = min(unlock_up_to, session.total_chunks - 1)
+            session.unlocked_chunk_index = max(session.unlocked_chunk_index, target)
+        elif session.unlocked_chunk_index < session.total_chunks - 1:
             session.unlocked_chunk_index += 1
         if session.unlocked_chunk_index >= session.total_chunks - 1:
             session.status = "completed"

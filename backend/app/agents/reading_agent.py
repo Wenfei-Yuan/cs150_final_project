@@ -142,7 +142,13 @@ class ReadingAgent:
         elif mode == ReadingMode.DEEP_COMPREHENSION:
             order = self.deep_svc.get_reading_order(chunks)
             session.reading_order = order
-            session.unlocked_chunk_index = 0  # locked: must pass quiz to advance
+            # Unlock all chunks in the first section so user can read freely within it
+            sections_meta = self._build_sections_meta(chunks)
+            if sections_meta:
+                first_section_last = max(sections_meta[0].get("chunk_indices", [0]))
+                session.unlocked_chunk_index = first_section_last
+            else:
+                session.unlocked_chunk_index = 0
 
     async def _get_all_chunks_meta(self, session) -> list[dict]:
         """Get lightweight chunk metadata for ordering."""
@@ -543,6 +549,45 @@ class ReadingAgent:
                 return mapped_type
         return "other"
 
+    # ── Section-aware helpers for deep mode ──────────────────────────────
+
+    async def _is_last_chunk_of_section(self, session, chunk_index: int) -> bool:
+        """Check if the given chunk_index is the last chunk of its section."""
+        chunks_meta = await self._get_all_chunks_meta(session)
+        sections_meta = await self._get_sections_meta(session)
+        for section in sections_meta:
+            indices = section.get("chunk_indices", [])
+            if chunk_index in indices and chunk_index == max(indices):
+                return True
+        return False
+
+    async def _get_section_text(self, session, chunk_index: int) -> str:
+        """Get the combined text of all chunks in the same section as chunk_index."""
+        chunks_meta = await self._get_all_chunks_meta(session)
+        sections_meta = await self._get_sections_meta(session)
+        for section in sections_meta:
+            indices = section.get("chunk_indices", [])
+            if chunk_index in indices:
+                section_chunks = await self.chunk_svc.get_chunks_in_range(
+                    session.document_id, min(indices), max(indices)
+                )
+                return "\n\n".join(c.text for c in section_chunks if c.chunk_index in indices)
+        # Fallback: just the current chunk
+        chunk = await self.chunk_svc.get_chunk_by_index(session.document_id, chunk_index)
+        return chunk.text
+
+    async def _get_next_section_last_chunk_index(self, session, chunk_index: int) -> int | None:
+        """Get the last chunk index of the section following the one containing chunk_index."""
+        sections_meta = await self._get_sections_meta(session)
+        for i, section in enumerate(sections_meta):
+            indices = section.get("chunk_indices", [])
+            if chunk_index in indices:
+                if i + 1 < len(sections_meta):
+                    next_indices = sections_meta[i + 1].get("chunk_indices", [])
+                    return max(next_indices) if next_indices else None
+                return None
+        return None
+
     # ── Mind Map ──────────────────────────────────────────────────────────
 
     async def get_mind_map(self, session_id: str) -> dict:
@@ -566,11 +611,15 @@ class ReadingAgent:
     # ── Set Goal (goal-directed mode) ─────────────────────────────────────
 
     async def set_goal(self, session_id: str, goal: str) -> dict:
-        """User sets their research goal → LLM ranks chunks by relevance."""
+        """User sets their research goal → LLM ranks chunks by relevance. Adds guardrail for relevance."""
         session = await self.memory_svc.get_session(session_id)
-        session.user_goal = goal
-
+        # Get all chunk texts for relevance check
         chunks_meta = await self._get_all_chunks_meta(session)
+        doc_chunks = [c["text"] for c in chunks_meta]
+        # Guardrail: check if goal is relevant to the article
+        self.input_guard.validate_goal_relevance(goal, doc_chunks)
+
+        session.user_goal = goal
         ranked = await self.goal_svc.rank_chunks_by_relevance(goal, chunks_meta)
         reading_order = self.goal_svc.get_reading_order(ranked)
 
@@ -616,6 +665,11 @@ class ReadingAgent:
         mode = session.mode or "deep_comprehension"
         strategy = STRATEGY_PROFILES.get(ReadingMode(mode))
 
+        # Determine if this chunk is the last in its section
+        is_section_end = False
+        if mode == ReadingMode.DEEP_COMPREHENSION.value:
+            is_section_end = await self._is_last_chunk_of_section(session, chunk.chunk_index)
+
         packet = {
             "session_id": str(session.id),
             "document_id": str(session.document_id),
@@ -625,6 +679,7 @@ class ReadingAgent:
             "key_terms": summary_data["key_terms"],
             "mode": mode,
             "user_goal": session.user_goal,
+            "is_section_end": is_section_end,
             "progress": {
                 "current": session.current_chunk_index,
                 "total": session.total_chunks,
@@ -731,16 +786,19 @@ class ReadingAgent:
     # ── Chunk Quiz (deep mode) ────────────────────────────────────────────
 
     async def handle_chunk_quiz(self, session_id: str) -> dict:
-        """Deep mode: generate a quiz question for the current chunk."""
+        """Deep mode: generate 2 quiz questions for the current section."""
         session = await self.memory_svc.get_session(session_id)
         chunk = await self.chunk_svc.get_current_chunk(session)
 
-        question = await self.deep_svc.generate_quiz_question(chunk.text)
+        # Gather all chunk texts in the current section
+        section_text = await self._get_section_text(session, chunk.chunk_index)
+
+        questions = await self.deep_svc.generate_section_quiz(section_text, num_questions=2)
 
         return {
             "session_id": str(session.id),
             "chunk_index": chunk.chunk_index,
-            "question": question,
+            "questions": questions,
         }
 
     async def handle_quiz_answer(self, session_id: str, question: dict, user_answer: str) -> dict:
@@ -761,8 +819,13 @@ class ReadingAgent:
         )
 
         if correct:
-            await self.memory_svc.unlock_next_chunk(session_id)
-            return {"correct": True, "explanation": "Correct! Moving to the next chunk."}
+            # Unlock the entire next section
+            next_section_last = await self._get_next_section_last_chunk_index(session, chunk.chunk_index)
+            if next_section_last is not None:
+                await self.memory_svc.unlock_up_to_chunk(session_id, next_section_last)
+            else:
+                await self.memory_svc.unlock_next_chunk(session_id)
+            return {"correct": True, "explanation": "Correct! Moving to the next section."}
 
         return {
             "correct": False,
@@ -771,17 +834,27 @@ class ReadingAgent:
         }
 
     async def handle_quiz_wrong_action(self, session_id: str, action: str, chunk_index: int) -> dict:
-        """Handle user's choice after failing a quiz: retry, mark, or skip."""
+        """Handle user's choice after failing a quiz: retry, mark (deferred to article end), or skip."""
+        session = await self.memory_svc.get_session(session_id)
+        next_section_last = await self._get_next_section_last_chunk_index(session, chunk_index)
+
         if action == "retry":
             return {"action": "retry", "message": "Let's try again!"}
 
         if action == "mark_for_later":
-            await self.memory_svc.mark_chunk_for_retry_and_unlock(session_id, chunk_index)
-            return {"action": "marked", "message": "Marked for review. Moving on."}
+            # Mark for article-end review, unlock entire next section
+            unlock_target = next_section_last if next_section_last is not None else None
+            await self.memory_svc.mark_chunk_for_retry_and_unlock(
+                session_id, chunk_index, unlock_up_to=unlock_target
+            )
+            return {"action": "marked", "message": "Marked for review at the end of the article. Moving on."}
 
-        # skip
-        await self.memory_svc.unlock_next_chunk(session_id)
-        return {"action": "skipped", "message": "Skipped. Moving to next chunk."}
+        # skip — unlock entire next section
+        if next_section_last is not None:
+            await self.memory_svc.unlock_up_to_chunk(session_id, next_section_last)
+        else:
+            await self.memory_svc.unlock_next_chunk(session_id)
+        return {"action": "skipped", "message": "Skipped. Moving to next section."}
 
     # ── Evaluate quick-check answers (legacy, still used for deep mode) ───
 

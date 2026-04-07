@@ -68,6 +68,31 @@ class InputGuard:
                 detail=f"Input too short (minimum {min_chars} characters).",
             )
 
+    def validate_goal_relevance(self, goal: str, doc_chunks: list[str], threshold: float = 0.15) -> None:
+        """
+        Guardrail: Check if the user's goal is relevant to the document.
+        If not, raise an HTTPException with guidance to refocus.
+        Uses simple keyword overlap as a fast filter.
+        """
+        from fastapi import HTTPException, status
+        import difflib
+        goal_words = set(goal.lower().split())
+        if not goal_words:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Goal must not be empty."
+            )
+        # Flatten all doc chunks into one string for keyword matching
+        doc_text = " ".join(doc_chunks).lower()
+        doc_words = set(doc_text.split())
+        overlap = goal_words & doc_words
+        ratio = len(overlap) / max(len(goal_words), 1)
+        if ratio < threshold:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="您的研究目标似乎与当前文章内容关联度较低。请尝试提出与本文相关的问题，以便更好地完成本次阅读任务。"
+            )
+
     # ── Internal helpers ──────────────────────────────────────────────────
 
     @staticmethod

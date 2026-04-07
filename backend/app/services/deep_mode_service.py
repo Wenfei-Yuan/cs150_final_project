@@ -157,6 +157,38 @@ class DeepComprehensionModeService:
         logger.info("Generated %s quiz question", question_type)
         return data["question"]
 
+    async def generate_section_quiz(self, section_text: str, num_questions: int = 2) -> list[dict]:
+        """
+        Generate multiple quiz questions for a full section.
+        Each question uses a different random type to add variety.
+        """
+        questions = []
+        used_types: list[str] = []
+        for i in range(num_questions):
+            available_types = ["true_false", "multiple_choice", "fill_blank"]
+            # Try to avoid repeating the same type
+            remaining = [t for t in available_types if t not in used_types]
+            if not remaining:
+                remaining = available_types
+            question_type = random.choice(remaining)
+            used_types.append(question_type)
+
+            templates = {
+                "true_false": _QUIZ_USER_TF,
+                "multiple_choice": _QUIZ_USER_MCQ,
+                "fill_blank": _QUIZ_USER_FILL,
+            }
+            raw = await chat_completion_json(
+                system_prompt=_QUIZ_SYSTEM,
+                user_prompt=templates[question_type].format(chunk_text=section_text),
+            )
+            data = parse_and_validate(raw, CHUNK_QUIZ_SCHEMA)
+            q = data["question"]
+            q["id"] = f"q{i + 1}"
+            questions.append(q)
+            logger.info("Generated section quiz question %d/%d (%s)", i + 1, num_questions, question_type)
+        return questions
+
     def check_answer(self, question: dict, user_answer: str) -> bool:
         """Check if the user's answer is correct."""
         correct = question["correct_answer"].strip().lower()

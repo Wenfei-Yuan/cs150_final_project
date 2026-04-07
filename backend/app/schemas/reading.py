@@ -48,6 +48,7 @@ class ChunkPacketResponse(BaseModel):
     mode: str | None = None
     user_goal: str | None = None
     retell_required: bool = False
+    is_section_end: bool = False
 
 
 # ── Retell ────────────────────────────────────────────────────────────────────

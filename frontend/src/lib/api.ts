@@ -15,7 +15,6 @@ async function request<T>(method: string, path: string, body?: unknown, isFormDa
 }
 
 export type KeyTerm = { term: string; note: string }
-export type Question = { id: string; question: string; question_type: string }
 export type ProgressInfo = { current: number; total: number; unlocked_until: number }
 
 export type ChunkPacket = {
@@ -25,11 +24,12 @@ export type ChunkPacket = {
   text: string
   annotated_summary: string[]
   key_terms: KeyTerm[]
-  quick_check_questions: Question[]
   progress: ProgressInfo
   can_continue: boolean
   mode?: string
   retell_required?: boolean
+  is_section_end?: boolean
+  jump_return_index?: number | null
 }
 
 export type MindMapSubChunk = {
@@ -60,11 +60,32 @@ export type RetellResult = {
   feedback_text: string
 }
 
-export type QuickCheckResult = {
-  passed: boolean
-  score: number
-  results: { question_id: string; correct: boolean; explanation: string }[]
-  feedback_text: string
+
+
+export type QuizQuestion = {
+  id: string
+  question: string
+  question_type: string
+  options: string[]
+  correct_answer: string
+}
+
+export type QuizData = {
+  session_id: string
+  chunk_index: number
+  questions: QuizQuestion[]
+}
+
+export type QuizAnswerResult = {
+  question_id: string
+  correct: boolean
+  explanation: string
+}
+
+export type QuizSubmitResult = {
+  all_correct: boolean
+  results: QuizAnswerResult[]
+  options_on_wrong: string[]
 }
 
 export const api = {
@@ -83,14 +104,19 @@ export const api = {
     request<MindMapResponse>('GET', `/sessions/${sessionId}/mind-map`),
   getCurrentChunk: (sessionId: string) =>
     request<ChunkPacket>('GET', `/sessions/${sessionId}/current`),
-  jumpToSection: (sessionId: string, sectionIndex: number) =>
+  jumpToSection: (sessionId: string, sectionIndex: number, chunkIndex?: number) =>
     request<{ session_id?: string; jumped_to_chunk?: number; section_index?: number; error?: string }>(
-      'POST', `/sessions/${sessionId}/jump`, { section_index: sectionIndex }
+      'POST', `/sessions/${sessionId}/jump`,
+      chunkIndex != null
+        ? { section_index: sectionIndex, chunk_index: chunkIndex }
+        : { section_index: sectionIndex }
+    ),
+  jumpBack: (sessionId: string) =>
+    request<{ session_id: string; returned_to_chunk: number; error?: string }>(
+      'POST', `/sessions/${sessionId}/jump-back`
     ),
   submitRetell: (sessionId: string, text: string) =>
     request<RetellResult>('POST', `/sessions/${sessionId}/retell`, { text }),
-  submitQuickCheck: (sessionId: string, answers: { question_id: string; answer: string }[]) =>
-    request<QuickCheckResult>('POST', `/sessions/${sessionId}/quick-check`, { answers }),
   nextChunk: (sessionId: string) =>
     request<{ current_chunk_index: number; total_chunks: number }>(
       'POST', `/sessions/${sessionId}/next`
@@ -99,5 +125,14 @@ export const api = {
     request<{ current_chunk_index: number; total_chunks: number }>(
       'POST', `/sessions/${sessionId}/skip`
     ),
+  getQuiz: (sessionId: string) =>
+    request<QuizData>('GET', `/sessions/${sessionId}/quiz`),
+  submitQuizAnswers: (sessionId: string, answers: { question_id: string; answer: string }[]) =>
+    request<QuizSubmitResult>('POST', `/sessions/${sessionId}/quiz-answer`, { answers }),
+  submitQuizAction: (sessionId: string, action: string) =>
+    request<{ action: string; message: string }>(
+      'POST', `/sessions/${sessionId}/quiz-action`, { action }
+    ),
   getPdfUrl: (documentId: string) => `${BASE_URL}/documents/${documentId}/pdf`,
+
 }

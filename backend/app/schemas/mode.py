@@ -172,7 +172,8 @@ class ChunkQuizQuestion(BaseModel):
 
 
 class ChunkQuizResponse(BaseModel):
-    question: ChunkQuizQuestion
+    question: ChunkQuizQuestion | None = None
+    questions: list[ChunkQuizQuestion] = []
     session_id: str
     chunk_index: int
 
@@ -180,6 +181,10 @@ class ChunkQuizResponse(BaseModel):
 class ChunkQuizAnswerRequest(BaseModel):
     question_id: str
     answer: str
+
+
+class SectionQuizAnswerRequest(BaseModel):
+    answers: list[dict]  # [{"question_id": "q1", "answer": "..."}, ...]
 
 
 class ChunkQuizResultResponse(BaseModel):

@@ -8,8 +8,9 @@ import {
   type ChunkPacket,
   type MindMapResponse,
   type MindMapSection,
-  type QuickCheckResult,
   type RetellResult,
+  type QuizQuestion,
+  type QuizAnswerResult,
 } from '@/lib/api'
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -112,18 +113,30 @@ function Progress({ current, total, stage }: { current: number; total: number; s
 function MindMapPanel({
   mindMap,
   activeSectionIndex,
+  activeChunkIndex,
   loading,
   error,
   jumpingSection,
+  mode,
+  jumpReturnIndex,
   onJump,
+  onJumpToChunk,
+  onJumpBack,
 }: {
   mindMap: MindMapResponse | null
   activeSectionIndex: number | null
+  activeChunkIndex: number | null
   loading: boolean
   error: string | null
   jumpingSection: number | null
+  mode: string | undefined
+  jumpReturnIndex: number | null | undefined
   onJump: (section: MindMapSection) => Promise<void>
+  onJumpToChunk: (sectionIndex: number, chunkIndex: number) => Promise<void>
+  onJumpBack: () => Promise<void>
 }) {
+  const canJumpToChunk = mode === 'skim' || mode === 'goal_directed'
+  const showReturnButton = jumpReturnIndex != null
   return (
     <aside className="w-72 shrink-0 border-r border-border bg-muted/20 overflow-y-auto">
       <div className="px-4 py-5 space-y-4">
@@ -131,6 +144,21 @@ function MindMapPanel({
           <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground">Mind Map</p>
           <p className="text-sm text-foreground">Navigate by section at any point in the reading flow.</p>
         </div>
+
+        {showReturnButton && (
+          <button
+            onClick={() => void onJumpBack()}
+            className="w-full rounded-xl border border-dashed border-foreground/40 px-3 py-2.5 text-left transition-colors hover:border-foreground hover:bg-background group"
+          >
+            <div className="flex items-center gap-2">
+              <span className="text-sm">↩</span>
+              <div>
+                <p className="text-sm font-medium text-foreground">Return to reading line</p>
+                <p className="text-[11px] text-muted-foreground">Back to chunk {jumpReturnIndex! + 1}</p>
+              </div>
+            </div>
+          </button>
+        )}
 
         {loading && <p className="text-xs text-muted-foreground">Loading section map…</p>}
         {error && <p className="text-xs text-destructive">{error}</p>}
@@ -167,14 +195,33 @@ function MindMapPanel({
 
               {section.sub_chunks.length > 0 && (
                 <div className="mt-3 flex flex-wrap gap-1.5">
-                  {section.sub_chunks.map((sub) => (
-                    <span
-                      key={sub.chunk_index}
-                      className="rounded-full border border-border px-2 py-1 text-[11px] text-muted-foreground"
-                    >
-                      {sub.chunk_index + 1}
-                    </span>
-                  ))}
+                  {section.sub_chunks.map((sub) => {
+                    const isActiveChunk = sub.chunk_index === activeChunkIndex
+                    return canJumpToChunk ? (
+                      <button
+                        key={sub.chunk_index}
+                        onClick={(e) => { e.stopPropagation(); void onJumpToChunk(section.section_index, sub.chunk_index) }}
+                        title={sub.brief_summary}
+                        className={`rounded-full border px-2 py-1 text-[11px] transition-colors ${
+                          isActiveChunk
+                            ? 'border-foreground bg-foreground text-background font-medium'
+                            : 'border-border text-muted-foreground hover:border-foreground/60 hover:text-foreground'
+                        }`}
+                      >
+                        {sub.chunk_index + 1}
+                      </button>
+                    ) : (
+                      <span
+                        key={sub.chunk_index}
+                        title={sub.brief_summary}
+                        className={`rounded-full border border-border px-2 py-1 text-[11px] text-muted-foreground ${
+                          isActiveChunk ? 'border-foreground font-medium' : ''
+                        }`}
+                      >
+                        {sub.chunk_index + 1}
+                      </span>
+                    )
+                  })}
                 </div>
               )}
             </button>
@@ -202,9 +249,14 @@ export default function ReadPage() {
   const [retellResult, setRetellResult] = useState<RetellResult | null>(null)
   const [retellLoading, setRetellLoading] = useState(false)
 
-  const [answers, setAnswers] = useState<Record<string, string>>({})
-  const [quizResult, setQuizResult] = useState<QuickCheckResult | null>(null)
+  const [quizQuestions, setQuizQuestions] = useState<QuizQuestion[]>([])
+  const [quizAnswers, setQuizAnswers] = useState<Record<string, string>>({})
+  const [quizResults, setQuizResults] = useState<QuizAnswerResult[] | null>(null)
   const [quizLoading, setQuizLoading] = useState(false)
+  const [quizAllCorrect, setQuizAllCorrect] = useState(false)
+  const [quizWrongOptions, setQuizWrongOptions] = useState<string[]>([])
+  const [quizActionLoading, setQuizActionLoading] = useState(false)
+
   const [pdfOpen, setPdfOpen] = useState(false)
 
   useEffect(() => {
@@ -222,8 +274,11 @@ export default function ReadPage() {
       setStage('read')
       setRetell('')
       setRetellResult(null)
-      setAnswers({})
-      setQuizResult(null)
+      setQuizQuestions([])
+      setQuizAnswers({})
+      setQuizResults(null)
+      setQuizAllCorrect(false)
+      setQuizWrongOptions([])
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load chunk.')
     } finally {
@@ -258,20 +313,54 @@ export default function ReadPage() {
     }
   }
 
-  async function handleQuizSubmit() {
-    if (!chunk) return
+  async function loadQuiz() {
     setQuizLoading(true)
     try {
-      const formatted = chunk.quick_check_questions.map((q) => ({
-        question_id: q.id,
-        answer: answers[q.id] ?? '',
-      }))
-      const result = await api.submitQuickCheck(sessionId!, formatted)
-      setQuizResult(result)
+      const data = await api.getQuiz(sessionId!)
+      setQuizQuestions(data.questions)
+      setQuizAnswers({})
+      setQuizResults(null)
+      setQuizAllCorrect(false)
+      setQuizWrongOptions([])
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Submission failed.')
+      setError(e instanceof Error ? e.message : 'Failed to load quiz.')
     } finally {
       setQuizLoading(false)
+    }
+  }
+
+  async function handleQuizSubmit() {
+    const answers = quizQuestions.map((q) => ({
+      question_id: q.id,
+      answer: quizAnswers[q.id] || '',
+    }))
+    setQuizLoading(true)
+    try {
+      const result = await api.submitQuizAnswers(sessionId!, answers)
+      setQuizResults(result.results)
+      setQuizAllCorrect(result.all_correct)
+      setQuizWrongOptions(result.options_on_wrong)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to submit quiz.')
+    } finally {
+      setQuizLoading(false)
+    }
+  }
+
+  async function handleQuizAction(action: string) {
+    setQuizActionLoading(true)
+    try {
+      await api.submitQuizAction(sessionId!, action)
+      if (action === 'retry') {
+        await loadQuiz()
+      } else {
+        // mark_for_later or skip: advance to next section
+        await handleAdvance()
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Action failed.')
+    } finally {
+      setQuizActionLoading(false)
     }
   }
 
@@ -315,6 +404,40 @@ export default function ReadPage() {
     }
   }
 
+  async function handleJumpToChunk(sectionIndex: number, chunkIndex: number) {
+    if (!sessionId) return
+
+    setJumpingSection(sectionIndex)
+    setError(null)
+    try {
+      const result = await api.jumpToSection(sessionId, sectionIndex, chunkIndex)
+      if (result.error) {
+        throw new Error(result.error)
+      }
+      await loadChunk()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not jump to chunk.')
+    } finally {
+      setJumpingSection(null)
+    }
+  }
+
+  async function handleJumpBack() {
+    if (!sessionId) return
+    setLoading(true)
+    setError(null)
+    try {
+      const result = await api.jumpBack(sessionId)
+      if (result.error) {
+        throw new Error(result.error)
+      }
+      await loadChunk()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not return to reading line.')
+      setLoading(false)
+    }
+  }
+
   // ── Loading / error ───────────────────────────────────────────────────────────
 
   if (loading) {
@@ -346,25 +469,32 @@ export default function ReadPage() {
     mindMap?.sections.find((section) => section.chunk_indices.includes(chunk.chunk_index))?.section_index ?? null
 
   const retellPassed = retellResult?.passed ?? false
-  const quizPassed = quizResult?.passed ?? false
-  const allAnswersFilled = chunk.quick_check_questions.every(q => (answers[q.id] ?? '').trim().length > 0)
   const onSplitScreen = stage !== 'read'
+  const isSectionEnd = chunk.is_section_end && chunk.mode === 'deep_comprehension'
 
   const nextDisabled =
     (stage === 'retell' && !retellPassed && (retell.trim().length < 50 || retellLoading)) ||
     (stage === 'retell' && retellResult !== null && !retellPassed) ||
-    (stage === 'quiz'   && !quizPassed && (!allAnswersFilled || quizLoading))
+    (stage === 'quiz' && !quizAllCorrect && quizResults === null && quizLoading)
 
   async function handleNavNext() {
-    if (stage === 'read')                   { setStage('retell'); return }
-    if (stage === 'retell' && retellPassed) { setStage('quiz'); return }
-    if (stage === 'retell')                 { await handleRetellSubmit(); return }
-    if (stage === 'quiz' && quizPassed)     {
+    if (stage === 'read') { setStage('retell'); return }
+    if (stage === 'retell' && retellPassed) {
+      if (isSectionEnd) {
+        setStage('quiz')
+        await loadQuiz()
+        return
+      }
       if (current + 1 < total) await handleAdvance()
       else navigate('/')
       return
     }
-    if (stage === 'quiz')                   { await handleQuizSubmit(); return }
+    if (stage === 'retell') { await handleRetellSubmit(); return }
+    if (stage === 'quiz' && quizAllCorrect) {
+      if (current + 1 < total) await handleAdvance()
+      else navigate('/')
+      return
+    }
   }
 
   // ── Top bar ───────────────────────────────────────────────────────────────────
@@ -404,7 +534,7 @@ export default function ReadPage() {
           style={{ fontSize: '14px' }}
           className="flex items-center gap-1 text-foreground disabled:opacity-30 transition-opacity"
         >
-          {(retellLoading || quizLoading) && <Spinner />}
+          {retellLoading && <Spinner />}
           Next →
         </button>
         {current + 1 < total && (
@@ -430,10 +560,15 @@ export default function ReadPage() {
           <MindMapPanel
             mindMap={mindMap}
             activeSectionIndex={activeSectionIndex}
+            activeChunkIndex={chunk.chunk_index}
             loading={mindMapLoading}
             error={mindMapError}
             jumpingSection={jumpingSection}
+            mode={chunk.mode}
+            jumpReturnIndex={chunk.jump_return_index}
             onJump={handleJumpToSection}
+            onJumpToChunk={handleJumpToChunk}
+            onJumpBack={handleJumpBack}
           />
 
           <div className="flex-1 overflow-y-auto">
@@ -479,10 +614,15 @@ export default function ReadPage() {
         <MindMapPanel
           mindMap={mindMap}
           activeSectionIndex={activeSectionIndex}
+          activeChunkIndex={chunk.chunk_index}
           loading={mindMapLoading}
           error={mindMapError}
           jumpingSection={jumpingSection}
+          mode={chunk.mode}
+          jumpReturnIndex={chunk.jump_return_index}
           onJump={handleJumpToSection}
+          onJumpToChunk={handleJumpToChunk}
+          onJumpBack={handleJumpBack}
         />
 
         {/* 1st column — PDF */}
@@ -567,54 +707,136 @@ export default function ReadPage() {
             </div>
           )}
 
-          {/* ── Quiz ── */}
+          {/* ── Quiz (section end only) ── */}
           {stage === 'quiz' && (
-            <div className="space-y-8">
+            <div className="space-y-5">
               <div className="space-y-1">
-                <p className="text-sm font-medium text-foreground">Quick check</p>
-                <p className="text-xs text-muted-foreground">
-                  {quizPassed ? 'Well done.' : 'Answer to unlock the next section.'}
-                </p>
+                <p className="text-sm font-medium text-foreground">Section Quiz</p>
+                <p className="text-xs text-muted-foreground">Answer these 2 questions to move to the next section.</p>
               </div>
 
-              <div className="space-y-6">
-                {chunk.quick_check_questions.map((q, i) => {
-                  const res = quizResult?.results.find(r => r.question_id === q.id)
-                  return (
-                    <div key={q.id} className="space-y-2">
-                      <p className="text-sm text-foreground">{i + 1}. {q.question}</p>
-                      <textarea
-                        value={answers[q.id] ?? ''}
-                        onChange={(e) => !quizPassed && setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
-                        readOnly={quizPassed}
-                        rows={3}
-                        className={`w-full bg-transparent border border-border rounded-lg px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground resize-none focus:outline-none transition-colors ${quizPassed ? 'opacity-60 cursor-default' : 'focus:border-foreground'}`}
-                        placeholder="Your answer…"
-                      />
-                      {res && (
-                        <div className="p-3 rounded-lg bg-muted space-y-1">
-                          <p className="text-xs text-muted-foreground">{res.correct ? '✓ correct' : '✗ incorrect'}</p>
-                          <p className="text-sm text-foreground">{res.explanation}</p>
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-
-              {quizResult && (
-                <p className="text-xs text-muted-foreground">{quizResult.feedback_text}</p>
+              {quizLoading && quizQuestions.length === 0 && (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Spinner /> Generating questions…
+                </div>
               )}
 
-              {!quizPassed && (
+              {quizQuestions.map((q, idx) => {
+                const result = quizResults?.find((r) => r.question_id === q.id)
+                return (
+                  <div key={q.id} className="space-y-3 p-4 rounded-lg border border-border">
+                    <p className="text-sm font-medium text-foreground">Q{idx + 1}: {q.question}</p>
+
+                    {q.question_type === 'true_false' && (
+                      <div className="flex gap-3">
+                        {q.options.map((opt) => (
+                          <button
+                            key={opt}
+                            onClick={() => !quizResults && setQuizAnswers((prev) => ({ ...prev, [q.id]: opt }))}
+                            disabled={quizResults !== null}
+                            className={`px-4 py-2 rounded-lg border text-sm transition-colors ${
+                              quizAnswers[q.id] === opt
+                                ? 'border-foreground bg-foreground text-background'
+                                : 'border-border text-foreground hover:border-foreground/60'
+                            } ${quizResults ? 'opacity-60 cursor-default' : ''}`}
+                          >
+                            {opt}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {q.question_type === 'multiple_choice' && (
+                      <div className="space-y-2">
+                        {q.options.map((opt) => (
+                          <button
+                            key={opt}
+                            onClick={() => !quizResults && setQuizAnswers((prev) => ({ ...prev, [q.id]: opt.charAt(0) }))}
+                            disabled={quizResults !== null}
+                            className={`w-full text-left px-4 py-2 rounded-lg border text-sm transition-colors ${
+                              quizAnswers[q.id] === opt.charAt(0)
+                                ? 'border-foreground bg-foreground text-background'
+                                : 'border-border text-foreground hover:border-foreground/60'
+                            } ${quizResults ? 'opacity-60 cursor-default' : ''}`}
+                          >
+                            {opt}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {q.question_type === 'fill_blank' && (
+                      <input
+                        type="text"
+                        value={quizAnswers[q.id] || ''}
+                        onChange={(e) => !quizResults && setQuizAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                        readOnly={quizResults !== null}
+                        placeholder="Type your answer…"
+                        className={`w-full bg-transparent border border-border rounded-lg px-4 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground ${quizResults ? 'opacity-60 cursor-default' : ''}`}
+                      />
+                    )}
+
+                    {result && (
+                      <p className={`text-xs ${result.correct ? 'text-green-600' : 'text-destructive'}`}>
+                        {result.correct ? 'Correct!' : result.explanation}
+                      </p>
+                    )}
+                  </div>
+                )
+              })}
+
+              {/* Submit quiz answers */}
+              {quizQuestions.length > 0 && !quizResults && (
                 <button
                   onClick={handleQuizSubmit}
-                  disabled={!allAnswersFilled || quizLoading}
+                  disabled={quizLoading || Object.keys(quizAnswers).length < quizQuestions.length}
                   className="flex items-center gap-2 text-sm font-medium text-foreground underline underline-offset-4 disabled:opacity-30 disabled:no-underline"
                 >
                   {quizLoading && <Spinner />}
-                  {quizLoading ? 'Checking…' : quizResult ? 'Try again →' : 'Submit →'}
+                  {quizLoading ? 'Checking…' : 'Submit Answers →'}
                 </button>
+              )}
+
+              {/* Wrong answer options */}
+              {quizResults && !quizAllCorrect && quizWrongOptions.length > 0 && (
+                <div className="space-y-3 p-4 rounded-lg bg-muted">
+                  <p className="text-sm text-foreground">What would you like to do?</p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={() => void handleQuizAction('retry')}
+                      disabled={quizActionLoading}
+                      className="px-4 py-2 rounded-lg border border-border text-sm text-foreground hover:border-foreground transition-colors disabled:opacity-30"
+                    >
+                      Try Again
+                    </button>
+                    <button
+                      onClick={() => void handleQuizAction('mark_for_later')}
+                      disabled={quizActionLoading}
+                      className="px-4 py-2 rounded-lg border border-border text-sm text-foreground hover:border-foreground transition-colors disabled:opacity-30"
+                    >
+                      Answer at Article End
+                    </button>
+                    <button
+                      onClick={() => void handleQuizAction('skip')}
+                      disabled={quizActionLoading}
+                      className="px-4 py-2 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30"
+                    >
+                      Skip
+                    </button>
+                  </div>
+                  {quizActionLoading && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Spinner /> Processing…
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* All correct */}
+              {quizResults && quizAllCorrect && (
+                <div className="p-4 rounded-lg bg-muted">
+                  <p className="text-sm text-foreground">All correct! Click Next to continue.</p>
+                </div>
               )}
             </div>
           )}

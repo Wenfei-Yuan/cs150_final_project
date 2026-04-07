@@ -13,6 +13,7 @@ from app.api.routes_upload import router as upload_router
 from app.api.routes_session import router as session_router
 from app.api.routes_reading import router as reading_router
 from app.api.routes_eval import router as eval_router
+from app.api.routes_learning_test import router as learning_test_router
 
 logger = get_logger(__name__)
 
@@ -58,6 +59,7 @@ app.include_router(upload_router, prefix="/documents", tags=["documents"])
 app.include_router(session_router, prefix="/sessions", tags=["sessions"])
 app.include_router(reading_router, prefix="/users", tags=["users"])
 app.include_router(eval_router, prefix="/eval", tags=["eval"])
+app.include_router(learning_test_router, prefix="/learning-test", tags=["learning-test"])
 
 # ── Global exception handlers ────────────────────────────────────────────────
 
