@@ -11,9 +11,9 @@ from app.core.logger import get_logger
 from app.core.exceptions import LLMOutputSchemaError, GroundingViolationError
 from app.api.routes_upload import router as upload_router
 from app.api.routes_session import router as session_router
-from app.api.routes_reading import router as reading_router
-from app.api.routes_eval import router as eval_router
 from app.api.routes_learning_test import router as learning_test_router
+from app.api.routes_persona import router as persona_router
+from app.api.routes_explain import router as explain_router
 
 logger = get_logger(__name__)
 
@@ -57,9 +57,9 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(upload_router, prefix="/documents", tags=["documents"])
 app.include_router(session_router, prefix="/sessions", tags=["sessions"])
-app.include_router(reading_router, prefix="/users", tags=["users"])
-app.include_router(eval_router, prefix="/eval", tags=["eval"])
 app.include_router(learning_test_router, prefix="/learning-test", tags=["learning-test"])
+app.include_router(persona_router, prefix="/persona", tags=["persona"])
+app.include_router(explain_router, prefix="/explain", tags=["explain"])
 
 # ── Global exception handlers ────────────────────────────────────────────────
 

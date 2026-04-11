@@ -1,17 +1,24 @@
 """
 Learning Test service — generate 9 MCQs (3 easy / 3 medium / 3 hard)
-from a document's chunks, evaluate user answers, and persist the score
-in the user's long-term profile.
+from a document's chunks, evaluate user answers, persist the score
+in the user's long-term profile, save per-answer state for mid-test
+navigation, and write the experiment session log.
 """
 from __future__ import annotations
 import uuid
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, delete
 
 from app.db.models.chunk import Chunk
 from app.db.models.user_profile import UserProfileMemory
+from app.db.models.quiz_answer import QuizAnswer
+from app.db.models.session_log import SessionLog
 from app.llm.client import chat_completion_json
 from app.llm.parser import parse_and_validate
+from app.services.persona_service import PersonaService
+from app.services.rag_service import RagService
+from app.llm.embeddings import get_embedder
 from app.core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -83,6 +90,7 @@ _GEN_SYSTEM = (
     "Easy questions test basic recall; medium questions test understanding and connections; "
     "hard questions test critical analysis and inference. "
     "All questions MUST be answerable from the provided text. "
+    "Generate NEUTRAL question stems — do not adopt any persona or stylistic flair. "
     "Respond ONLY with valid JSON."
 )
 
@@ -136,24 +144,112 @@ class LearningTestService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
-    # ── Generate 9 MCQs ───────────────────────────────────────────────────
+    # ── Generate 9 MCQs (RAG-balanced + optional persona rewrite) ────────
 
-    async def generate_questions(self, document_id: str) -> list[dict]:
-        """Fetch all chunk texts for a document, concatenate, and ask LLM for 9 MCQs."""
+    async def generate_questions(
+        self,
+        document_id: str,
+        persona: str | None = None,
+    ) -> list[dict]:
+        """
+        Generate 9 neutral MCQs balanced across the full document, then
+        optionally rewrite stems for the chosen persona.
+
+        RAG strategy (avoids front-truncation of long documents):
+          - easy  (3 q): anchor queries on factual/definition phrases from the
+                         earliest chunks, retrieve top-3 semantically similar chunks.
+          - medium (3 q): anchor on mid-document summary-like phrases, top-4.
+          - hard  (3 q): anchor on the whole-document key-idea query, top-5,
+                         favouring diverse coverage.
+          Each difficulty band gets its own context block → the LLM sees
+          representative text from all parts of the document.
+
+        Falls back to the full-text-truncation approach if the vector store
+        is unavailable (e.g. document not yet indexed).
+        """
         doc_text = await self._get_document_text(document_id)
 
-        # Truncate to ~12 000 chars to stay within context limits
-        max_chars = 12_000
-        if len(doc_text) > max_chars:
-            doc_text = doc_text[:max_chars] + "\n[...truncated...]"
+        try:
+            rag_context = await self._build_rag_context_for_quiz(
+                document_id=document_id,
+                full_text=doc_text,
+            )
+        except Exception as exc:
+            logger.warning(
+                "RAG context build failed for quiz (doc=%s): %s — falling back to truncation",
+                document_id, exc,
+            )
+            max_chars = 12_000
+            rag_context = doc_text[:max_chars] + ("\n[...truncated...]" if len(doc_text) > max_chars else "")
 
         raw = await chat_completion_json(
             system_prompt=_GEN_SYSTEM,
-            user_prompt=_GEN_USER.format(doc_text=doc_text),
+            user_prompt=_GEN_USER.format(doc_text=rag_context),
         )
         data = parse_and_validate(raw, LEARNING_TEST_SCHEMA)
-        logger.info("Generated 9 learning-test questions for doc %s", document_id)
-        return data["questions"]
+        questions = data["questions"]
+        logger.info("Generated 9 neutral MCQs for doc %s", document_id)
+
+        # Rewrite stems for persona (only the phrasing, not content/answers)
+        if persona in ("professor", "peer"):
+            persona_svc = PersonaService(self.db)
+            questions = await persona_svc.rewrite_questions(questions, persona)
+            logger.info("Rewrote question stems for persona '%s'", persona)
+
+        return questions
+
+    # ── RAG context builder for quiz generation ───────────────────────────
+
+    async def _build_rag_context_for_quiz(
+        self, document_id: str, full_text: str
+    ) -> str:
+        """
+        Build a context string for quiz generation that samples content from
+        across the full document rather than naively truncating.
+
+        Three difficulty-anchored queries retrieve diverse chunks:
+          easy   → factual/definition content (early sections)
+          medium → comparison/relationship content (mid sections)
+          hard   → inference/argument content (late sections + whole-doc theme)
+        """
+        rag = RagService()
+        embedder = get_embedder()
+
+        # Anchor queries that naturally pull from different reading depths
+        queries = {
+            "easy": "key definitions terminology facts introduced in this document",
+            "medium": "relationships comparisons mechanisms described in this document",
+            "hard": "main argument overall conclusion implications of this document",
+        }
+        top_ks = {"easy": 3, "medium": 4, "hard": 5}
+
+        seen_ids: set[str] = set()
+        blocks: list[str] = []
+
+        for difficulty, query in queries.items():
+            query_emb = await embedder.embed_text(query)
+            hits = rag._ensure_store().query(
+                document_id=document_id,
+                query_embedding=query_emb,
+                n_results=top_ks[difficulty],
+            )
+            band_texts: list[str] = []
+            for hit in hits:
+                hit_id = hit["id"]
+                if hit_id not in seen_ids and hit.get("text"):
+                    seen_ids.add(hit_id)
+                    band_texts.append(hit["text"])
+            if band_texts:
+                blocks.append(
+                    f"[Context for {difficulty} questions]\n" + "\n\n".join(band_texts)
+                )
+
+        if not blocks:
+            raise RuntimeError("RAG returned no chunks")
+
+        combined = "\n\n===\n\n".join(blocks)
+        # Safety cap — LLM context; 15k chars is plenty for 9 questions
+        return combined[:15_000]
 
     # ── Evaluate answers ──────────────────────────────────────────────────
 
@@ -204,6 +300,107 @@ class LearningTestService:
             r["explanation"] = expl_map.get(r["question_id"], "")
 
         return results, eval_data.get("overall_feedback", "")
+
+    # ── Quiz answer state persistence ────────────────────────────────────
+
+    async def save_answer(
+        self,
+        session_id: str,
+        question_id: str,
+        selected_answer: str,
+        correct_answer: str,
+        difficulty: str,
+    ) -> None:
+        """
+        Upsert a single answer for a session. Allows the user to change their
+        answer before final submission. Previous answer for the same question_id
+        is replaced.
+        """
+        sid = uuid.UUID(session_id)
+        await self.db.execute(
+            delete(QuizAnswer).where(
+                and_(
+                    QuizAnswer.session_id == sid,
+                    QuizAnswer.question_id == question_id,
+                )
+            )
+        )
+        is_correct = selected_answer.strip().upper() == correct_answer.strip().upper()
+        answer = QuizAnswer(
+            session_id=sid,
+            question_id=question_id,
+            selected_answer=selected_answer.upper(),
+            correct_answer=correct_answer.upper(),
+            is_correct=is_correct,
+            difficulty=difficulty,
+        )
+        self.db.add(answer)
+        await self.db.commit()
+        logger.debug(
+            "Saved answer %s for question %s in session %s",
+            selected_answer, question_id, session_id,
+        )
+
+    async def get_saved_answers(self, session_id: str) -> dict[str, str]:
+        """
+        Return a mapping of {question_id: selected_answer} for the session.
+        """
+        result = await self.db.execute(
+            select(QuizAnswer).where(QuizAnswer.session_id == uuid.UUID(session_id))
+        )
+        answers = result.scalars().all()
+        return {a.question_id: a.selected_answer for a in answers}
+
+    # ── Session log ───────────────────────────────────────────────────────
+
+    async def write_session_log(
+        self,
+        session_id: str,
+        user_name: str,
+        persona: str,
+        document_id: str,
+        results: list[dict],
+        started_at: datetime | None = None,
+    ) -> SessionLog:
+        """Write (or overwrite) the experiment log for a completed session."""
+        total_correct = sum(1 for r in results if r["is_correct"])
+        total_questions = len(results)
+        accuracy = round(total_correct / total_questions, 4) if total_questions else 0.0
+
+        question_results = [
+            {
+                "question_id": r["question_id"],
+                "difficulty": r.get("difficulty", ""),
+                "selected": r.get("selected", ""),
+                "correct": r["correct_answer"],
+                "is_correct": r["is_correct"],
+            }
+            for r in results
+        ]
+
+        await self.db.execute(
+            delete(SessionLog).where(SessionLog.session_id == uuid.UUID(session_id))
+        )
+
+        log = SessionLog(
+            session_id=uuid.UUID(session_id),
+            user_name=user_name,
+            persona=persona,
+            document_id=document_id,
+            question_results=question_results,
+            total_correct=total_correct,
+            total_questions=total_questions,
+            accuracy=accuracy,
+            started_at=started_at,
+        )
+        self.db.add(log)
+        await self.db.commit()
+        await self.db.refresh(log)
+        logger.info(
+            "Session log written: user=%s persona=%s score=%d/%d acc=%.4f",
+            user_name, persona, total_correct, total_questions, accuracy,
+        )
+        return log
 
     # ── Persist score into user profile ───────────────────────────────────
 

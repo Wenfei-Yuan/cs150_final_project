@@ -1,39 +1,53 @@
 """
-ADHD Reading Companion — Mode-Aware Demo CLI
+ADHD Reading Companion — 5-Stage Demo CLI
 
-This CLI exercises the full mode-aware reading pipeline:
-  Step 1: Upload document → Create session
-  Step 2: Session setup (3 questions → LLM mode selection)
-  Step 3: Mind map navigation
-  Step 4: Mode-specific reading loop
-  Step 5: Takeaway / session conclusion
+Stages:
+  Stage 1: Upload a PDF
+  Stage 2: Enter your name (creates the session)
+  Stage 3: Choose a persona (Professor | ADHD Peer)
+  Stage 4: Persona intro + full-text reading + neutral chatbot (explain highlights)
+  Stage 5: 9-question MCQ test (persona-voiced), answers saved, graded results
 """
 import json
 import mimetypes
 import os
 import sys
 import uuid
+from datetime import datetime, timezone
 from urllib import error, request
 
 BASE_URL = os.getenv("DEMO_API_BASE", "http://localhost:8000").rstrip("/")
 
+# ── Shared CLI state ──────────────────────────────────────────────────────────
+
 STATE = {
     "document_id": None,
     "session_id": None,
-    "user_id": "1",
-    "mode": None,
-    "learning_test_questions": [],
+    "user_id": "user_1",   # internal id (slug of user_name)
+    "user_name": None,
+    "persona": None,
+    "questions": [],        # generated MCQ list
+    "saved_answers": {},    # {question_id: selected_answer}  persisted mid-test
+    "test_started_at": None,
 }
 
+# ── Terminal colour helpers ───────────────────────────────────────────────────
 
-def pretty(title, value):
-    print(f"\n=== {title} ===")
-    if isinstance(value, (dict, list)):
-        print(json.dumps(value, ensure_ascii=False, indent=2))
-    else:
-        print(value)
-    print()
+_USE_COLOUR = sys.stdout.isatty() and os.name != "nt"
 
+
+def _c(code, text):
+    return f"\033[{code}m{text}\033[0m" if _USE_COLOUR else text
+
+
+def red(t):    return _c("31", t)
+def green(t):  return _c("32", t)
+def yellow(t): return _c("33", t)
+def cyan(t):   return _c("36", t)
+def bold(t):   return _c("1",  t)
+
+
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 def parse_body(raw):
     text = raw.decode("utf-8", errors="replace")
@@ -41,33 +55,6 @@ def parse_body(raw):
         return json.loads(text)
     except json.JSONDecodeError:
         return text
-
-
-def remember_ids(payload):
-    if not isinstance(payload, dict):
-        return
-    if payload.get("document_id") is not None:
-        STATE["document_id"] = payload["document_id"]
-    if payload.get("session_id") is not None:
-        STATE["session_id"] = payload["session_id"]
-    if payload.get("user_id") is not None:
-        STATE["user_id"] = payload["user_id"]
-    if payload.get("mode") is not None:
-        STATE["mode"] = payload["mode"]
-    if payload.get("recommended_mode") is not None:
-        STATE["mode"] = payload["recommended_mode"]
-
-
-def connection_error_payload(exc):
-    return {
-        "error_type": "connection_error",
-        "message": f"Cannot reach the backend at {BASE_URL}.",
-        "details": f"{type(exc).__name__}: {exc}",
-    }
-
-
-def is_connection_error_payload(payload):
-    return isinstance(payload, dict) and payload.get("error_type") == "connection_error"
 
 
 def http_request(method, path, json_body=None, data=None, headers=None):
@@ -79,641 +66,526 @@ def http_request(method, path, json_body=None, data=None, headers=None):
         req_headers["Content-Type"] = "application/json"
     req = request.Request(url=url, data=body, headers=req_headers, method=method.upper())
     try:
-        with request.urlopen(req, timeout=120) as resp:
+        with request.urlopen(req, timeout=180) as resp:
             return resp.status, parse_body(resp.read())
     except error.HTTPError as e:
         return e.code, parse_body(e.read())
     except (error.URLError, TimeoutError, ConnectionError) as e:
-        return None, connection_error_payload(e)
+        return None, {"error": f"Cannot reach {BASE_URL}: {e}"}
     except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
-
-
-def print_result(status, payload):
-    if is_connection_error_payload(payload):
-        pretty("Connection Error", payload["message"])
-        pretty("Details", payload["details"])
-        pretty(
-            "Next Steps",
-            "\n".join([
-                "1. Start the backend: python -m uvicorn app.main:app --host 0.0.0.0 --port 8000",
-                "2. Or start the stack: docker compose up --build",
-                f"3. If the backend uses a different address, set DEMO_API_BASE (current: {BASE_URL})",
-            ]),
-        )
-        return
-    pretty("HTTP Status", status)
-    pretty("Response", payload)
-    remember_ids(payload)
-
-
-def ensure_backend_available():
-    status, payload = http_request("GET", "/health")
-    print_result(status, payload)
-    if status == 200:
-        return True
-
-    print("Backend is not ready. Start it, then rerun the demo CLI.\n")
-    return False
-
-
-def prompt_input(text, default=None):
-    label = text
-    if default not in (None, ""):
-        label += f" [{default}]"
-    label += ": "
-    value = input(label).strip()
-    return value if value else (default or "")
-
-
-def friendly_mode_name(mode):
-    mode_value = getattr(mode, "value", mode)
-    return {
-        "skim": "Skim / Overview Mode",
-        "goal_directed": "Goal-Directed Search Mode",
-        "deep_comprehension": "Deep Comprehension Mode",
-    }.get(mode_value, str(mode_value).replace("_", " ").title())
-
-
-def stringify_mode_text(value, fallback=""):
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        for key in ("description", "mode_flow_description", "mode_explanation", "name", "mode"):
-            nested_value = value.get(key)
-            if isinstance(nested_value, str) and nested_value:
-                return nested_value
-        return fallback
-    if value is None:
-        return fallback
-    return str(getattr(value, "value", value))
-
-
-def normalize_mode_choice(mode_choice, fallback_mode="", fallback_description=""):
-    if not isinstance(mode_choice, dict):
-        return None
-
-    nested_choice = mode_choice.get("description") if isinstance(mode_choice.get("description"), dict) else {}
-    raw_mode = mode_choice.get("mode") or nested_choice.get("mode") or fallback_mode
-    mode = str(getattr(raw_mode, "value", raw_mode or ""))
-    description = stringify_mode_text(mode_choice.get("description"), fallback_description)
-
-    return {
-        "mode": mode,
-        "name": mode_choice.get("name") or nested_choice.get("name") or friendly_mode_name(mode),
-        "description": description,
-    }
-
-
-def unique_mode_choices(mode_choices):
-    choices = []
-    seen_modes = set()
-    for mode_choice in mode_choices:
-        if not mode_choice:
-            continue
-        mode = mode_choice.get("mode", "")
-        if not mode or mode in seen_modes:
-            continue
-        seen_modes.add(mode)
-        choices.append(mode_choice)
-    return choices
-
-
-def truncate_text(text, limit=100):
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}..."
-
-
-def normalize_learning_test_answer(choice):
-    value = str(choice).strip().upper()
-    if value in ("A", "B", "C", "D"):
-        return value
-    return {
-        "0": "A",
-        "1": "B",
-        "2": "C",
-        "3": "D",
-    }.get(value, "")
-
-
-def build_learning_test_submit_request(document_id, user_id, questions, answers):
-    return {
-        "document_id": str(document_id),
-        "user_id": str(user_id),
-        "questions": questions,
-        "answers": answers,
-    }
-
-
-def build_mode_choices(response):
-    available_modes = response.get("available_modes")
-    if isinstance(available_modes, list) and available_modes:
-        return unique_mode_choices([
-            normalize_mode_choice(mode_choice)
-            for mode_choice in available_modes
-        ])
-
-    recommended_mode = response.get("recommended_mode")
-    recommended_choice = None
-    if recommended_mode:
-        recommended_choice = normalize_mode_choice({
-            "mode": recommended_mode,
-            "name": friendly_mode_name(recommended_mode),
-            "description": response.get("mode_flow_description") or response.get("mode_explanation", ""),
-        }, fallback_mode=recommended_mode)
-
-    choices = []
-    if recommended_choice:
-        choices.append(recommended_choice)
-
-    for mode_choice in response.get("alternative_modes", []):
-        choices.append(
-            normalize_mode_choice(mode_choice)
-        )
-
-    return unique_mode_choices(choices)
-
-
-def mode_next_step_hint(mode):
-    if mode == "goal_directed":
-        return "  Next step: choose menu 12 to set your goal before reading chunks."
-    return "  Next step: choose menu 5 for the mind map or menu 7 to fetch the current chunk."
+        return None, {"error": f"{type(e).__name__}: {e}"}
 
 
 def encode_multipart(file_field, file_path, extra=None):
     extra = extra or {}
     boundary = f"----Boundary{uuid.uuid4().hex}"
-    chunks = []
+    parts = []
     for name, value in extra.items():
-        if isinstance(value, (dict, list)):
-            value = json.dumps(value, ensure_ascii=False)
-        else:
-            value = str(value)
-        chunks.append(f"--{boundary}\r\n".encode())
-        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
-        chunks.append(value.encode("utf-8"))
-        chunks.append(b"\r\n")
+        value = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
+        parts += [
+            f"--{boundary}\r\n".encode(),
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
+            value.encode("utf-8"),
+            b"\r\n",
+        ]
     filename = os.path.basename(file_path)
     ctype = mimetypes.guess_type(filename)[0] or "application/pdf"
     with open(file_path, "rb") as f:
         file_bytes = f.read()
-    chunks.append(f"--{boundary}\r\n".encode())
-    chunks.append(f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'.encode())
-    chunks.append(f"Content-Type: {ctype}\r\n\r\n".encode())
-    chunks.append(file_bytes)
-    chunks.append(b"\r\n")
-    chunks.append(f"--{boundary}--\r\n".encode())
-    body = b"".join(chunks)
-    headers = {
+    parts += [
+        f"--{boundary}\r\n".encode(),
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'.encode(),
+        f"Content-Type: {ctype}\r\n\r\n".encode(),
+        file_bytes,
+        b"\r\n",
+        f"--{boundary}--\r\n".encode(),
+    ]
+    body = b"".join(parts)
+    return body, {
         "Content-Type": f"multipart/form-data; boundary={boundary}",
         "Content-Length": str(len(body)),
     }
-    return body, headers
 
 
-# ── Step 1: Upload + Create Session ───────────────────────────────────────────
+# ── I/O helpers ───────────────────────────────────────────────────────────────
 
-def health_check():
-    status, payload = http_request("GET", "/health")
-    print_result(status, payload)
+def prompt(text, default=""):
+    label = text + (f" [{default}]" if default else "") + ": "
+    val = input(label).strip()
+    return val if val else default
 
 
-def upload_document():
-    file_path = prompt_input("PDF path")
+def section(title):
+    print()
+    print(bold("=" * 60))
+    print(bold(f"  {title}"))
+    print(bold("=" * 60))
+
+
+def ok(msg):    print(green(f"  \u2713 {msg}"))
+def err(msg):   print(red(f"  \u2717 {msg}"))
+def info(msg):  print(cyan(f"  \u2192 {msg}"))
+def warn(msg):  print(yellow(f"  ! {msg}"))
+
+
+def die(msg):
+    err(msg)
+    sys.exit(1)
+
+
+def require_ok(status, payload, ctx=""):
+    if status and 200 <= status < 300:
+        return payload
+    detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+    die(f"{ctx} failed (HTTP {status}): {detail}")
+
+
+# ── Stage 1: Upload PDF ───────────────────────────────────────────────────────
+
+def stage1_upload():
+    section("Stage 1 \u2014 Upload PDF")
+    file_path = prompt("Path to PDF file")
     if not os.path.exists(file_path):
-        print("\nFile not found.\n")
-        return
-    user_id = prompt_input("user_id", str(STATE["user_id"] or 1))
+        die(f"File not found: {file_path}")
+
+    info("Uploading and processing document (this may take a moment)\u2026")
     body, headers = encode_multipart("file", file_path)
-    status, payload = http_request("POST", f"/documents/upload?user_id={user_id}", data=body, headers=headers)
-    print_result(status, payload)
-
-
-def create_session():
-    did = STATE["document_id"]
-    uid = STATE["user_id"] or "1"
-    if not did:
-        did = prompt_input("document_id")
-    payload = {"user_id": uid, "document_id": did}
-    status, resp = http_request("POST", "/sessions", json_body=payload)
-    print_result(status, resp)
-
-
-# ── Step 2: Session Setup (3 Questions → Mode Selection) ─────────────────────
-
-def session_setup():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-
-    # Fetch setup questions
-    status, questions = http_request("GET", "/sessions/setup-questions")
-    if status != 200:
-        print_result(status, questions)
-        return
-
-    print("\n" + "=" * 50)
-    print("  SESSION SETUP — Answer 3 questions")
-    print("=" * 50)
-
-    # Extract the questions list from the response dict
-    q_list = questions.get("questions", questions) if isinstance(questions, dict) else questions
-
-    answers = {}
-    for q in q_list:
-        print(f"\n  {q['question']}")
-        for i, opt in enumerate(q["options"]):
-            print(f"    {i}. {opt}")
-        while True:
-            choice = prompt_input("  Your choice (0-3)", "0")
-            if choice in ("0", "1", "2", "3"):
-                answers[q["id"]] = int(choice)
-                break
-            print("  Please enter 0, 1, 2, or 3.")
-
-    # Submit answers
-    status, resp = http_request("POST", f"/sessions/{sid}/setup", json_body=answers)
-    print_result(status, resp)
-
-    if isinstance(resp, dict) and resp.get("recommended_mode"):
-        print(f"  Recommended mode: {resp['recommended_mode']}")
-        print(f"  Explanation: {resp.get('mode_explanation', '')}")
-        mode_choices = build_mode_choices(resp)
-        recommended_mode = resp["recommended_mode"]
-        selected_mode = recommended_mode
-        override = prompt_input("  Accept mode? (y/n)", "y")
-        if override.lower() == "n":
-            if mode_choices:
-                print("\n  Choose one of the three modes:")
-                default_index = next(
-                    (i for i, mode in enumerate(mode_choices) if mode.get("mode") == recommended_mode),
-                    0,
-                )
-                for i, mode_choice in enumerate(mode_choices):
-                    marker = " (recommended)" if mode_choice.get("mode") == recommended_mode else ""
-                    description = stringify_mode_text(mode_choice.get("description", ""))
-                    print(f"    {i}. {mode_choice.get('name', friendly_mode_name(mode_choice.get('mode', '')))} [{mode_choice.get('mode', '')}]{marker}")
-                    if description:
-                        print(f"       {truncate_text(description)}")
-                choice = prompt_input("  Choose mode (number)", str(default_index))
-                idx = int(choice) if choice.isdigit() else default_index
-                idx = min(max(idx, 0), len(mode_choices) - 1)
-                selected_mode = mode_choices[idx]["mode"]
-            else:
-                print("  No mode choices were returned. Keeping the recommended mode.")
-
-        if selected_mode != recommended_mode:
-            status, resp = http_request(
-                "POST", f"/sessions/{sid}/mode-override",
-                json_body={"mode": selected_mode},
-            )
-            print_result(status, resp)
-        else:
-            print("  Keeping the recommended mode.")
-
-        print(f"  Selected mode: {selected_mode}")
-        print(mode_next_step_hint(selected_mode))
-
-
-# ── Step 3: Mind Map ──────────────────────────────────────────────────────────
-
-def show_mind_map():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    status, payload = http_request("GET", f"/sessions/{sid}/mind-map")
-    print_result(status, payload)
-
-    if isinstance(payload, dict) and "sections" in payload:
-        print("\n  DOCUMENT MIND MAP:")
-        for s in payload["sections"]:
-            print(f"    [{s.get('section_index', '?')}] {s.get('section_type', '?')}: {s.get('title', '?')}")
-            print(f"        {s.get('summary', '')[:100]}")
-
-
-def jump_to_section():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    idx = prompt_input("Section index to jump to", "0")
-    status, resp = http_request("POST", f"/sessions/{sid}/jump", json_body={"section_index": int(idx)})
-    print_result(status, resp)
-
-
-# ── Step 4: Reading Loop (mode-specific) ─────────────────────────────────────
-
-def get_current_chunk():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    status, payload = http_request("GET", f"/sessions/{sid}/current")
-    print_result(status, payload)
-
-
-def next_chunk():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    status, resp = http_request("POST", f"/sessions/{sid}/next", json_body={})
-    print_result(status, resp)
-
-
-def skip_chunk():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    status, resp = http_request("POST", f"/sessions/{sid}/skip", json_body={})
-    print_result(status, resp)
-
-
-# ── Skim Mode Interactions ────────────────────────────────────────────────────
-
-def get_full_summary():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    status, resp = http_request("GET", f"/sessions/{sid}/full-summary")
-    print_result(status, resp)
-
-
-def self_assess():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    choice = prompt_input("Understood this section? (y/n)", "y")
-    understood = choice.lower() == "y"
-    status, resp = http_request("POST", f"/sessions/{sid}/self-assess", json_body={"understood": understood})
-    print_result(status, resp)
-
-    if not understood:
-        question = prompt_input("Which parts are unclear? I'd be happy to help explain.", "")
-        if question:
-            status, resp = http_request("POST", f"/sessions/{sid}/ask-question", json_body={"question": question})
-            print_result(status, resp)
-
-
-# ── Goal-Directed Mode Interactions ──────────────────────────────────────────
-
-def set_goal():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    goal = prompt_input("Your research goal/question")
-    status, resp = http_request("POST", f"/sessions/{sid}/goal", json_body={"goal": goal})
-    print_result(status, resp)
-
-
-def goal_check():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    choice = prompt_input("Was this chunk helpful for your goal? (y/n)", "y")
-    helpful = choice.lower() == "y"
-    status, resp = http_request("POST", f"/sessions/{sid}/goal-check", json_body={"helpful": helpful})
-    print_result(status, resp)
-
-
-# ── Deep Mode Interactions ───────────────────────────────────────────────────
-
-def submit_retell():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    text = input("Enter your retell (or press Enter to skip):\n> ").strip()
-    status, resp = http_request("POST", f"/sessions/{sid}/retell", json_body={"text": text})
-    print_result(status, resp)
-
-
-def get_quiz():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    status, resp = http_request("GET", f"/sessions/{sid}/quiz")
-    print_result(status, resp)
-
-    if isinstance(resp, dict) and "question" in resp:
-        q = resp["question"]
-        print(f"\n  Question: {q['question']}")
-        if q.get("options"):
-            for opt in q["options"]:
-                print(f"    {opt}")
-        answer = prompt_input("Your answer")
-
-        status2, resp2 = http_request("POST", f"/sessions/{sid}/quiz-answer",
-                                       json_body={"question_id": q["id"], "answer": answer})
-        print_result(status2, resp2)
-
-        if isinstance(resp2, dict) and not resp2.get("correct", True):
-            print("  Options: retry, mark_for_later, skip")
-            action = prompt_input("What do you want to do?", "skip")
-            status3, resp3 = http_request("POST", f"/sessions/{sid}/quiz-action",
-                                           json_body={"action": action})
-            print_result(status3, resp3)
-
-
-# ── Takeaway (all modes) ─────────────────────────────────────────────────────
-
-def submit_takeaway():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    mode = STATE.get("mode")
-    if mode == "goal_directed":
-        prompt = (
-            "Did you extract the goal information? Try answering your original question:\n> "
-        )
-    else:
-        prompt = "Your takeaway from this reading session:\n> "
-    text = input(prompt).strip()
-    status, resp = http_request("POST", f"/sessions/{sid}/takeaway", json_body={"text": text})
-    print_result(status, resp)
-
-
-# ── Learning Test (independent) ──────────────────────────────────────────────
-
-def generate_learning_test():
-    did = STATE["document_id"] or prompt_input("document_id")
-    uid = prompt_input("user_id", str(STATE["user_id"] or "1"))
-    status, resp = http_request(
-        "POST",
-        "/learning-test/generate",
-        json_body={"document_id": did, "user_id": uid},
+    status, payload = http_request(
+        "POST", f"/documents/upload?user_id={STATE['user_id']}",
+        data=body, headers=headers,
     )
-    print_result(status, resp)
-    if isinstance(resp, dict) and isinstance(resp.get("questions"), list):
-        STATE["learning_test_questions"] = resp["questions"]
-        print(f"Loaded {len(resp['questions'])} learning-test questions into CLI state.")
+    require_ok(status, payload, "Upload")
+
+    STATE["document_id"] = payload["document_id"]
+    ok(f"Document uploaded: {payload['filename']}")
+    ok(f"Document ID: {STATE['document_id']}")
+    info("Press Enter to continue to Stage 2.")
+    input()
 
 
-def submit_learning_test():
-    did = STATE["document_id"] or prompt_input("document_id")
-    uid = prompt_input("user_id", str(STATE["user_id"] or "1"))
-    questions = STATE.get("learning_test_questions") or []
+# ── Stage 2: Enter username → create session ──────────────────────────────────
 
-    if not questions:
-        print("\nNo learning-test questions in state. Run menu 21 first.\n")
+def stage2_username():
+    section("Stage 2 \u2014 Enter Your Name")
+    name = prompt("Your name (used to identify your session)")
+    if not name:
+        die("Name cannot be empty.")
+
+    user_id = name.strip().lower().replace(" ", "_")
+    STATE["user_name"] = name
+    STATE["user_id"] = user_id
+
+    if not STATE["document_id"]:
+        STATE["document_id"] = prompt("Document ID (from Stage 1)")
+
+    info("Creating reading session\u2026")
+    status, payload = http_request(
+        "POST", "/sessions",
+        json_body={"user_id": user_id, "document_id": STATE["document_id"]},
+    )
+    require_ok(status, payload, "Create session")
+
+    STATE["session_id"] = str(payload["session_id"])
+    ok(f"Session created: {STATE['session_id']}")
+    ok(f"Hello, {name}!")
+    info("Press Enter to continue to Stage 3.")
+    input()
+
+
+# ── Stage 3: Choose persona ────────────────────────────────────────────────────
+
+def stage3_persona():
+    section("Stage 3 \u2014 Choose Your Persona")
+    print()
+    print("  \u250c" + "\u2500" * 53 + "\u2510")
+    print("  \u2502  1.  Professor                                       \u2502")
+    print("  \u2502      A university professor who guides you through  \u2502")
+    print("  \u2502      the material in a structured, academic tone.   \u2502")
+    print("  \u251c" + "\u2500" * 53 + "\u2524")
+    print("  \u2502  2.  ADHD Peer                                       \u2502")
+    print("  \u2502      A college peer who also has ADHD \u2014 warm,       \u2502")
+    print("  \u2502      casual, and conversational support.             \u2502")
+    print("  \u2514" + "\u2500" * 53 + "\u2518")
+    print()
+
+    while True:
+        choice = prompt("Choose persona (1 or 2)", "1")
+        if choice == "1":
+            persona = "professor"
+            break
+        elif choice == "2":
+            persona = "peer"
+            break
+        else:
+            warn("Please enter 1 or 2.")
+
+    STATE["persona"] = persona
+
+    if not STATE["session_id"]:
+        STATE["session_id"] = prompt("Session ID (from Stage 2)")
+
+    info(f"Setting persona to '{persona}' and generating introduction\u2026")
+    status, payload = http_request(
+        "POST", "/persona/select",
+        json_body={"session_id": STATE["session_id"], "persona": persona},
+    )
+    require_ok(status, payload, "Persona select")
+
+    print()
+    print(bold(f"  [{persona.upper()} SELF-INTRODUCTION]"))
+    print()
+    for line in payload["intro"].split("\n"):
+        print(f"  {line}")
+    print()
+    ok(f"Persona '{persona}' activated.")
+    info("Press Enter to continue to Stage 4 (Reading).")
+    input()
+
+
+# ── Stage 4: Full-text reading + neutral chatbot ──────────────────────────────
+
+def stage4_reading():
+    section("Stage 4 \u2014 Reading Stage")
+
+    if not STATE["document_id"]:
+        STATE["document_id"] = prompt("Document ID")
+
+    info("Fetching full document text\u2026")
+    status, payload = http_request(
+        "GET", f"/documents/{STATE['document_id']}/full-text"
+    )
+    require_ok(status, payload, "Fetch full text")
+
+    full_text = payload["full_text"]
+
+    print()
+    print(bold("  \u2500\u2500 DOCUMENT TEXT " + "\u2500" * 44))
+    for para in full_text.split("\n\n"):
+        para = para.strip()
+        if not para:
+            continue
+        words = para.split()
+        line = "  "
+        for word in words:
+            if len(line) + len(word) + 1 > 82:
+                print(line)
+                line = "  " + word
+            else:
+                line += (" " if line.strip() else "") + word
+        if line.strip():
+            print(line)
+        print()
+    print(bold("  \u2500\u2500 END OF DOCUMENT " + "\u2500" * 42))
+
+    print()
+    print(cyan("  Neutral Chatbot is active."))
+    print(cyan("  Paste any sentence from the text above to get an explanation."))
+    print(cyan("  Type 'done' when you are ready to proceed to the test."))
+    print()
+
+    while True:
+        highlighted = input(bold("  Paste highlighted text (or 'done'): ")).strip()
+        if highlighted.lower() in ("done", "d", ""):
+            print()
+            ok("Reading stage complete.")
+            break
+
+        info("Explaining highlighted passage\u2026")
+        status, payload = http_request(
+            "POST", "/explain/selection",
+            json_body={
+                "document_id": STATE["document_id"],
+                "selected_text": highlighted,
+                "surrounding_text": "",
+            },
+        )
+        if status and 200 <= status < 300:
+            print()
+            print(bold("  [CHATBOT EXPLANATION]"))
+            for line in payload["explanation"].split("\n"):
+                print(f"  {line}")
+            print()
+        else:
+            detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+            warn(f"Explanation failed: {detail}")
+
+    info("Press Enter to continue to Stage 5 (Test).")
+    input()
+
+
+# ── Stage 5: MCQ test ─────────────────────────────────────────────────────────
+
+def _generate_questions():
+    info("Generating 9 questions \u2014 this may take ~30 seconds\u2026")
+    status, payload = http_request(
+        "POST", "/learning-test/generate",
+        json_body={
+            "document_id": STATE["document_id"],
+            "user_id": STATE["user_id"],
+            "persona": STATE["persona"],
+        },
+    )
+    require_ok(status, payload, "Generate questions")
+    STATE["questions"] = payload["questions"]
+    ok(f"Generated {len(STATE['questions'])} questions.")
+    return STATE["questions"]
+
+
+def _load_saved_answers():
+    if not STATE["session_id"]:
+        return {}
+    status, payload = http_request(
+        "GET", f"/learning-test/state?session_id={STATE['session_id']}"
+    )
+    if status == 200 and isinstance(payload, dict):
+        STATE["saved_answers"] = payload.get("answers", {})
+    return STATE["saved_answers"]
+
+
+def _save_answer(question_id, selected, correct, difficulty):
+    if not STATE["session_id"]:
         return
+    http_request(
+        "POST", "/learning-test/answer",
+        json_body={
+            "session_id": STATE["session_id"],
+            "question_id": question_id,
+            "selected_answer": selected,
+            "correct_answer": correct,
+            "difficulty": difficulty,
+        },
+    )
+    STATE["saved_answers"][question_id] = selected
 
-    answers = []
-    print("\n" + "=" * 50)
-    print("  LEARNING TEST — Submit Your Answers")
-    print("=" * 50)
 
+def _display_question(idx, q, saved):
+    diff_label = {
+        "easy": green("EASY"),
+        "medium": yellow("MEDIUM"),
+        "hard": red("HARD"),
+    }.get(q["difficulty"].lower(), q["difficulty"].upper())
+    print()
+    print(bold(f"  Q{idx}. [{diff_label}]  {q['question']}"))
+    for opt in q["options"]:
+        print(f"       {opt}")
+    pre = saved.get(q["id"])
+    if pre:
+        print(cyan(f"       (Previously answered: {pre})"))
+
+
+def stage5_test():
+    section("Stage 5 \u2014 Knowledge Test")
+    print()
+    print(yellow("  Note: the chatbot is disabled during the test."))
+    print(yellow("  Type 'back' at any question to return to the reading stage."))
+    print(yellow("  Your answers are auto-saved \u2014 you can return and continue."))
+    print()
+
+    if not STATE["questions"]:
+        _generate_questions()
+
+    STATE["test_started_at"] = datetime.now(timezone.utc).isoformat()
+
+    questions = STATE["questions"]
+    saved = _load_saved_answers()
+
+    by_diff = {"easy": [], "medium": [], "hard": []}
     for q in questions:
-        print(f"\n[{q.get('id', '?')}] {q.get('difficulty', 'unknown').upper()} - {q.get('question', '')}")
-        options = q.get("options", [])
-        for i, option in enumerate(options):
-            print(f"  {i}. {option}")
-        while True:
-            raw = prompt_input("  Your answer (A-D or 0-3)", "A")
-            selected = normalize_learning_test_answer(raw)
-            if selected:
-                answers.append({"question_id": q.get("id"), "selected": selected})
-                break
-            print("  Please enter A, B, C, D, or 0, 1, 2, 3.")
+        by_diff.setdefault(q["difficulty"].lower(), []).append(q)
 
-    payload = build_learning_test_submit_request(did, uid, questions, answers)
-    status, resp = http_request("POST", "/learning-test/submit", json_body=payload)
-    print_result(status, resp)
+    display_order = []
+    for diff in ("easy", "medium", "hard"):
+        display_order.extend(by_diff.get(diff, []))
+
+    idx = 0
+    while idx < len(display_order):
+        q = display_order[idx]
+        _display_question(idx + 1, q, saved)
+        pre = saved.get(q["id"])
+        raw = prompt("  Your answer (A/B/C/D)", pre or "A").strip().upper()
+
+        if raw in ("BACK", "RETURN"):
+            warn("Returning to reading stage \u2014 your answers are saved.")
+            stage4_reading()
+            saved = _load_saved_answers()
+            idx = 0
+            continue
+
+        if raw not in ("A", "B", "C", "D"):
+            warn("Please enter A, B, C, or D.")
+            continue
+
+        _save_answer(q["id"], raw, q["correct_answer"], q["difficulty"])
+        saved[q["id"]] = raw
+        idx += 1
+
+    section("Submitting Test")
+    answers_list = [
+        {"question_id": q["id"], "selected": saved.get(q["id"], "A")}
+        for q in display_order
+    ]
+
+    info("Grading your answers\u2026")
+    status, payload = http_request(
+        "POST", "/learning-test/submit",
+        json_body={
+            "session_id": STATE["session_id"],
+            "document_id": STATE["document_id"],
+            "user_id": STATE["user_id"],
+            "user_name": STATE["user_name"] or STATE["user_id"],
+            "persona": STATE["persona"],
+            "questions": display_order,
+            "answers": answers_list,
+            "started_at": STATE["test_started_at"],
+        },
+    )
+    require_ok(status, payload, "Submit test")
+    _display_results(payload, display_order, saved)
 
 
-# ── Other ─────────────────────────────────────────────────────────────────────
+def _display_results(payload, questions, saved):
+    section("Results")
+    results_by_id = {r["question_id"]: r for r in payload.get("results", [])}
+    total = payload.get("max_score", len(questions))
+    score = payload.get("total_score", 0)
+    accuracy = round(score / total * 100, 1) if total else 0.0
 
-def show_progress():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    status, payload = http_request("GET", f"/sessions/{sid}/progress")
-    print_result(status, payload)
+    print()
+    for idx, q in enumerate(questions, 1):
+        r = results_by_id.get(q["id"], {})
+        is_correct = r.get("is_correct", False)
+        selected = saved.get(q["id"], "?")
+        correct_ans = q["correct_answer"]
+        diff_label = {"easy": "EASY", "medium": "MED ", "hard": "HARD"}.get(
+            q["difficulty"].lower(), "    "
+        )
+        icon = green("\u2713") if is_correct else red("\u2717")
+        q_text = q["question"][:70] + ("\u2026" if len(q["question"]) > 70 else "")
+        print(f"  {icon}  Q{idx} [{diff_label}]  {q_text}")
+        if is_correct:
+            print(green(f"       Your answer: {selected}  (correct)"))
+        else:
+            print(red(f"       Your answer: {selected}"))
+            print(green(f"       Correct answer: {correct_ans}"))
+        if r.get("explanation"):
+            for line in r["explanation"].split("\n")[:2]:
+                print(f"       {cyan(line)}")
+        print()
+
+    print(bold(f"  Score: {score} / {total}   Accuracy: {accuracy}%"))
+    print()
+    if payload.get("feedback"):
+        print(bold("  Overall Feedback:"))
+        for line in payload["feedback"].split("\n"):
+            print(f"  {line}")
+        print()
+
+    print(bold("  Session log written:"))
+    print(f"    Name:    {STATE['user_name'] or STATE['user_id']}")
+    print(f"    Persona: {STATE['persona']}")
+    print(f"    Score:   {score}/{total}  ({accuracy}%)")
+    print()
+    ok("Thank you for using the ADHD Reading Companion!")
 
 
-def show_history():
-    sid = STATE["session_id"]
-    if not sid:
-        sid = prompt_input("session_id")
-    status, payload = http_request("GET", f"/sessions/{sid}/history")
-    print_result(status, payload)
+# ── Logs viewer ────────────────────────────────────────────────────────────────
+
+def view_logs():
+    section("All Session Logs")
+    status, payload = http_request("GET", "/learning-test/logs")
+    if not (status and 200 <= status < 300):
+        err(f"Could not load logs (HTTP {status})")
+        return
+    if not payload:
+        info("No logs recorded yet.")
+        return
+    for log in payload:
+        print(f"  {'\u2500' * 56}")
+        print(f"  Name:      {log['user_name']}")
+        print(f"  Persona:   {log['persona']}")
+        acc = round(log["accuracy"] * 100, 1)
+        print(f"  Score:     {log['total_correct']}/{log['total_questions']}  ({acc}%)")
+        print(f"  Submitted: {log.get('submitted_at', '?')}")
+    print()
 
 
-def show_user_memory():
-    uid = prompt_input("user_id", str(STATE["user_id"] or 1))
-    status, payload = http_request("GET", f"/users/{uid}/memory")
-    print_result(status, payload)
-
-
-def custom_request():
-    method = prompt_input("HTTP method", "GET").upper()
-    path = prompt_input("Path", "/health")
-    send_body = prompt_input("Send JSON body? (y/n)", "n").lower() == "y"
-    payload = None
-    if send_body:
-        raw = prompt_input("JSON body", "{}")
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            print("\nBad JSON.\n")
-            return
-    status, resp = http_request(method, path, json_body=payload)
-    print_result(status, resp)
-
+# ── Main menu ─────────────────────────────────────────────────────────────────
 
 def print_menu():
-    mode_str = STATE["mode"] or "not set"
-    print("=" * 60)
-    print("  ADHD Reading Companion — Mode-Aware Demo CLI")
-    print(f"  Base URL: {BASE_URL}")
-    print("=" * 60)
-    print("  ── Step 1: Document & Session ──")
-    print("  1.  Health check")
-    print("  2.  Upload document (PDF)")
-    print("  3.  Create session")
+    doc = (STATE["document_id"] or "\u2014")[:36]
+    ses = (STATE["session_id"] or "\u2014")[:36]
+    usr = STATE["user_name"] or STATE["user_id"]
+    per = STATE["persona"] or "\u2014"
     print()
-    print("  ── Step 2: Session Setup ──")
-    print("  4.  Session setup (3 questions → mode)")
+    print(bold("=" * 60))
+    print(bold("  ADHD Reading Companion \u2014 5-Stage Demo CLI"))
+    print(bold(f"  {BASE_URL}"))
+    print(bold("=" * 60))
+    print(f"  doc={doc}  session={ses}")
+    print(f"  user={usr}  persona={per}")
     print()
-    print("  ── Step 3: Mind Map ──")
-    print("  5.  Show mind map")
-    print("  6.  Jump to section")
+    print("  \u2500\u2500 Guided Flow \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+    print("  1.  Stage 1 \u2014 Upload PDF")
+    print("  2.  Stage 2 \u2014 Enter name / create session")
+    print("  3.  Stage 3 \u2014 Choose persona")
+    print("  4.  Stage 4 \u2014 Read document + chatbot")
+    print("  5.  Stage 5 \u2014 Knowledge test")
     print()
-    print("  ── Step 4: Reading Loop ──")
-    print("  7.  Get current chunk")
-    print("  8.  Next chunk")
-    print("  9.  Skip chunk")
-    print()
-    print("  ── Mode-Specific Actions ──")
-    print("  10. [skim] Full paper summary")
-    print("  11. [skim] Self-assess (understood?)")
-    print("  12. [goal] Set research goal")
-    print("  13. [goal] Helpful check")
-    print("  14. [deep] Submit retell")
-    print("  15. [deep] Quiz (get + answer)")
-    print()
-    print("  ── Step 5: Wrap Up ──")
-    print("  16. Submit takeaway")
-    print("  17. Show progress")
-    print("  18. Show history")
-    print("  19. Show user memory")
-    print("  20. Custom request")
-    print()
-    print("  ── Learning Test ──")
-    print("  21. Generate learning test (9 MCQs)")
-    print("  22. Submit learning test answers")
+    print("  \u2500\u2500 Utilities \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+    print("  6.  Run full flow (stages 1 \u2192 5)")
+    print("  7.  View all session logs")
     print("  0.  Exit")
-    print("-" * 60)
-    print(f"  doc={STATE['document_id']}  session={STATE['session_id']}  "
-          f"user={STATE['user_id']}  mode={mode_str}")
-    print()
+    print(bold("-" * 60))
+
+
+def run_full_flow():
+    stage1_upload()
+    stage2_username()
+    stage3_persona()
+    stage4_reading()
+    stage5_test()
 
 
 def main():
+    status, _ = http_request("GET", "/health")
+    if status != 200:
+        die(
+            f"Backend not reachable at {BASE_URL}.\n"
+            "  Start with:  uvicorn app.main:app --host 0.0.0.0 --port 8000\n"
+            f"  Or set:      DEMO_API_BASE=http://... python demo_cli.py"
+        )
+
     print()
-    print("Starting Mode-Aware Demo CLI...")
+    print(bold("  ADHD Reading Companion \u2014 Demo CLI ready."))
+    print(bold(f"  Connected to: {BASE_URL}"))
     print()
-    if not ensure_backend_available():
-        sys.exit(1)
 
     handlers = {
-        "1": health_check,
-        "2": upload_document,
-        "3": create_session,
-        "4": session_setup,
-        "5": show_mind_map,
-        "6": jump_to_section,
-        "7": get_current_chunk,
-        "8": next_chunk,
-        "9": skip_chunk,
-        "10": get_full_summary,
-        "11": self_assess,
-        "12": set_goal,
-        "13": goal_check,
-        "14": submit_retell,
-        "15": get_quiz,
-        "16": submit_takeaway,
-        "17": show_progress,
-        "18": show_history,
-        "19": show_user_memory,
-        "20": custom_request,
-        "21": generate_learning_test,
-        "22": submit_learning_test,
+        "1": stage1_upload,
+        "2": stage2_username,
+        "3": stage3_persona,
+        "4": stage4_reading,
+        "5": stage5_test,
+        "6": run_full_flow,
+        "7": view_logs,
     }
 
     while True:
         print_menu()
-        choice = input("Choose: ").strip()
+        choice = input(bold("  Choose option: ")).strip()
         if choice == "0":
-            print("\nBye!\n")
-            sys.exit(0)
-        handler = handlers.get(choice)
-        if not handler:
-            print("\nInvalid choice.\n")
-            continue
-        try:
-            handler()
-        except KeyboardInterrupt:
-            print("\nCancelled.\n")
-        except Exception as e:
-            print(f"\nError: {type(e).__name__}: {e}\n")
+            print()
+            ok("Goodbye!")
+            break
+        fn = handlers.get(choice)
+        if fn:
+            try:
+                fn()
+            except KeyboardInterrupt:
+                print()
+                warn("Interrupted. Returning to menu.")
+        else:
+            warn("Invalid option.")
 
 
 if __name__ == "__main__":

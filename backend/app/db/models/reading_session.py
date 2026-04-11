@@ -34,6 +34,9 @@ class ReadingSession(Base):
     available_time: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     support_needed: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # Persona for experiment: professor | peer | None (legacy sessions)
+    persona: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+
     # Goal for goal-directed mode
     user_goal: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 

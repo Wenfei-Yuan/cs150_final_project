@@ -62,3 +62,35 @@ async def get_document(document_id: str, db: AsyncSession = Depends(get_db)):
         "created_at": doc.created_at,
         "updated_at": doc.updated_at,
     }
+
+
+@router.get("/{document_id}/full-text", summary="Get the full document text (no chunk boundaries)")
+async def get_full_text(document_id: str, db: AsyncSession = Depends(get_db)):
+    """
+    Return the complete document text by concatenating all chunks in order.
+    The frontend uses this to display the article as a single unbroken flow
+    (no chunk boundaries shown to the user).
+    """
+    from sqlalchemy import select
+    from app.db.models.chunk import Chunk
+    import uuid as _uuid
+
+    try:
+        doc_uuid = _uuid.UUID(document_id)
+    except ValueError:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Invalid document_id format")
+
+    result = await db.execute(
+        select(Chunk)
+        .where(Chunk.document_id == doc_uuid)
+        .order_by(Chunk.chunk_index)
+    )
+    chunks = result.scalars().all()
+    if not chunks:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="No content found for this document")
+
+    full_text = "\n\n".join(c.text for c in chunks)
+    return {"document_id": document_id, "full_text": full_text}
+
