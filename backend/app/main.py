@@ -1,5 +1,17 @@
 """
-Application entry point.
+Application entry point — ADHD Reading Companion (research build).
+
+5-stage user flow
+─────────────────
+Stage 1  Upload Material      POST /documents/upload
+Stage 2  Enter Username       POST /sessions
+Stage 3  Choose Persona       POST /persona/select
+Stage 4  Reading + Chatbot    GET  /documents/{id}/fulltext
+                              POST /persona/intro
+                              POST /explain/selection
+Stage 5  Comprehension Quiz   POST /learning-test/generate
+                              POST /learning-test/answer
+                              POST /learning-test/submit
 """
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -37,9 +49,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.APP_NAME,
     description=(
-        "Backend for the AI-powered paper reading companion. "
-        "Implements Document Processing, RAG, Agent Orchestration, "
-        "Guardrails, and User Memory."
+        "Research system studying the effect of LLM personas (Professor vs. ADHD Peer) "
+        "on reading comprehension for users with ADHD.\n\n"
+        "**5-stage flow:** Upload PDF → Enter username → Choose persona → "
+        "Read with inline AI explanation → Take persona-toned comprehension quiz.\n\n"
+        "Each session is logged with the user's name, chosen persona, per-question outcomes, "
+        "and overall accuracy to enable downstream analysis of persona effects."
     ),
     version="0.1.0",
     lifespan=lifespan,
@@ -54,12 +69,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Routers ───────────────────────────────────────────────────────────────────
+# ── Routers (5-stage flow) ────────────────────────────────────────────────────
+# Stage 1 — Upload Material
 app.include_router(upload_router, prefix="/documents", tags=["documents"])
+# Stage 2 — Enter Username / create session
 app.include_router(session_router, prefix="/sessions", tags=["sessions"])
-app.include_router(learning_test_router, prefix="/learning-test", tags=["learning-test"])
+# Stage 3 — Choose Persona + Stage 4 intro
 app.include_router(persona_router, prefix="/persona", tags=["persona"])
+# Stage 4 — Inline explanation chatbot
 app.include_router(explain_router, prefix="/explain", tags=["explain"])
+# Stage 5 — Comprehension quiz
+app.include_router(learning_test_router, prefix="/learning-test", tags=["learning-test"])
 
 # ── Global exception handlers ────────────────────────────────────────────────
 
