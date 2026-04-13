@@ -14,125 +14,168 @@ async function request<T>(method: string, path: string, body?: unknown, isFormDa
   return res.json() as Promise<T>
 }
 
-export type KeyTerm = { term: string; note: string }
-export type ProgressInfo = { current: number; total: number; unlocked_until: number }
+// ── Upload ─────────────────────────────────────────────────────────────────────
 
-export type ChunkPacket = {
+export type UploadResponse = {
+  document_id: string
+  filename: string
+  status: string
+  chunk_count: number
+}
+
+export type DocumentStatus = {
+  document_id: string
+  filename: string
+  status: string
+  chunk_count: number
+  created_at: string
+  updated_at: string
+}
+
+// ── Session ────────────────────────────────────────────────────────────────────
+
+export type SessionResponse = {
   session_id: string
   document_id: string
-  chunk_index: number
-  text: string
-  annotated_summary: string[]
-  key_terms: KeyTerm[]
-  progress: ProgressInfo
-  can_continue: boolean
-  mode?: string
-  retell_required?: boolean
-  is_section_end?: boolean
-  jump_return_index?: number | null
+  user_id: string
+  status: string
+  persona: string | null
 }
 
-export type MindMapSubChunk = {
-  chunk_index: number
-  brief_summary: string
-}
+// ── Persona ────────────────────────────────────────────────────────────────────
 
-export type MindMapSection = {
-  section_index: number
-  section_type: string
-  title: string
-  summary: string
-  chunk_indices: number[]
-  sub_chunks: MindMapSubChunk[]
-}
-
-export type MindMapResponse = {
-  document_id: string
-  sections: MindMapSection[]
-}
-
-export type RetellResult = {
-  score: number
-  passed: boolean
-  covered_points: string[]
-  missing_points: string[]
-  misconceptions: string[]
-  feedback_text: string
-}
-
-
-
-export type QuizQuestion = {
-  id: string
-  question: string
-  question_type: string
-  options: string[]
-  correct_answer: string
-}
-
-export type QuizData = {
+export type PersonaSelectResponse = {
   session_id: string
-  chunk_index: number
-  questions: QuizQuestion[]
+  persona: string
+  name: string
+  intro: string
 }
 
-export type QuizAnswerResult = {
-  question_id: string
-  correct: boolean
+export type PersonaIntroResponse = {
+  persona: string
+  name: string
+  intro: string
+}
+
+// ── Explain ────────────────────────────────────────────────────────────────────
+
+export type ExplainResponse = {
+  selected_text: string
   explanation: string
 }
 
-export type QuizSubmitResult = {
-  all_correct: boolean
-  results: QuizAnswerResult[]
-  options_on_wrong: string[]
+// ── Learning Test ──────────────────────────────────────────────────────────────
+
+export type TestQuestion = {
+  id: string
+  question: string
+  difficulty: 'easy' | 'medium' | 'hard'
+  options: string[]       // e.g. ["A. ...", "B. ...", "C. ...", "D. ..."]
+  correct_answer: string  // "A" | "B" | "C" | "D"
 }
 
+export type GenerateTestResponse = {
+  document_id: string
+  questions: TestQuestion[]
+}
+
+export type AnswerItem = {
+  question_id: string
+  selected: string  // "A" | "B" | "C" | "D"
+}
+
+export type QuestionResult = {
+  question_id: string
+  question: string
+  difficulty: string
+  selected: string
+  correct_answer: string
+  is_correct: boolean
+  explanation: string
+}
+
+export type SubmitTestResponse = {
+  total_score: number
+  max_score: number
+  results: QuestionResult[]
+  feedback: string
+}
+
+// ── API client ─────────────────────────────────────────────────────────────────
+
 export const api = {
+  // Stage 1: Upload
   uploadDocument: (file: File, userId = '1') => {
     const form = new FormData()
     form.append('file', file)
-    return request<{ document_id: string; filename: string; status: string; chunk_count: number }>(
-      'POST', `/documents/upload?user_id=${userId}`, form, true
-    )
+    return request<UploadResponse>('POST', `/documents/upload?user_id=${userId}`, form, true)
   },
-  createSession: (documentId: string, userId = '1') =>
-    request<{ session_id: string; document_id: string; total_chunks: number; current_chunk_index: number }>(
-      'POST', '/sessions', { document_id: documentId, user_id: userId }
-    ),
-  getMindMap: (sessionId: string) =>
-    request<MindMapResponse>('GET', `/sessions/${sessionId}/mind-map`),
-  getCurrentChunk: (sessionId: string) =>
-    request<ChunkPacket>('GET', `/sessions/${sessionId}/current`),
-  jumpToSection: (sessionId: string, sectionIndex: number, chunkIndex?: number) =>
-    request<{ session_id?: string; jumped_to_chunk?: number; section_index?: number; error?: string }>(
-      'POST', `/sessions/${sessionId}/jump`,
-      chunkIndex != null
-        ? { section_index: sectionIndex, chunk_index: chunkIndex }
-        : { section_index: sectionIndex }
-    ),
-  jumpBack: (sessionId: string) =>
-    request<{ session_id: string; returned_to_chunk: number; error?: string }>(
-      'POST', `/sessions/${sessionId}/jump-back`
-    ),
-  submitRetell: (sessionId: string, text: string) =>
-    request<RetellResult>('POST', `/sessions/${sessionId}/retell`, { text }),
-  nextChunk: (sessionId: string) =>
-    request<{ current_chunk_index: number; total_chunks: number }>(
-      'POST', `/sessions/${sessionId}/next`
-    ),
-  skipChunk: (sessionId: string) =>
-    request<{ current_chunk_index: number; total_chunks: number }>(
-      'POST', `/sessions/${sessionId}/skip`
-    ),
-  getQuiz: (sessionId: string) =>
-    request<QuizData>('GET', `/sessions/${sessionId}/quiz`),
-  submitQuizAnswers: (sessionId: string, answers: { question_id: string; answer: string }[]) =>
-    request<QuizSubmitResult>('POST', `/sessions/${sessionId}/quiz-answer`, { answers }),
-  submitQuizAction: (sessionId: string, action: string) =>
-    request<{ action: string; message: string }>(
-      'POST', `/sessions/${sessionId}/quiz-action`, { action }
-    ),
+
+  getDocument: (documentId: string) =>
+    request<DocumentStatus>('GET', `/documents/${documentId}`),
+
+  getFullText: (documentId: string) =>
+    request<{ document_id: string; full_text: string }>('GET', `/documents/${documentId}/full-text`),
+
   getPdfUrl: (documentId: string) => `${BASE_URL}/documents/${documentId}/pdf`,
 
+  // Stage 2: Create session (enter username)
+  createSession: (documentId: string, userId = '1') =>
+    request<SessionResponse>('POST', '/sessions', { document_id: documentId, user_id: userId }),
+
+  getSession: (sessionId: string) =>
+    request<SessionResponse>('GET', `/sessions/${sessionId}`),
+
+  // Stage 3: Persona
+  getPersonaIntro: (persona: string) =>
+    request<PersonaIntroResponse>('POST', '/persona/intro', { persona }),
+
+  selectPersona: (sessionId: string, persona: string) =>
+    request<PersonaSelectResponse>('POST', '/persona/select', { session_id: sessionId, persona }),
+
+  // Stage 4: Explain highlighted text
+  explainSelection: (documentId: string, selectedText: string, surroundingText = '') =>
+    request<ExplainResponse>('POST', '/explain/selection', {
+      document_id: documentId,
+      selected_text: selectedText,
+      surrounding_text: surroundingText,
+    }),
+
+  // Stage 5: Learning test
+  generateTest: (documentId: string, userId = '1', persona?: string) =>
+    request<GenerateTestResponse>('POST', '/learning-test/generate', {
+      document_id: documentId,
+      user_id: userId,
+      persona,
+    }),
+
+  saveAnswer: (sessionId: string, questionId: string, selectedAnswer: string, correctAnswer: string, difficulty: string) =>
+    request<{ saved: boolean }>('POST', '/learning-test/answer', {
+      session_id: sessionId,
+      question_id: questionId,
+      selected_answer: selectedAnswer,
+      correct_answer: correctAnswer,
+      difficulty,
+    }),
+
+  submitTest: (payload: {
+    sessionId: string
+    documentId: string
+    userId: string
+    userName: string
+    persona: string
+    questions: TestQuestion[]
+    answers: AnswerItem[]
+    startedAt?: string
+  }) =>
+    request<SubmitTestResponse>('POST', '/learning-test/submit', {
+      session_id: payload.sessionId,
+      document_id: payload.documentId,
+      user_id: payload.userId,
+      user_name: payload.userName,
+      persona: payload.persona,
+      questions: payload.questions,
+      answers: payload.answers,
+      started_at: payload.startedAt,
+    }),
 }

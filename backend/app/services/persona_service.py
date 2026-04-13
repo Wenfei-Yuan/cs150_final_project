@@ -47,6 +47,14 @@ _INTRO_USER = (
     "Please give your self-introduction now."
 )
 
+_NAME_SYSTEM_PROFESSOR = (
+    "Generate a single realistic full name for a male university professor "
+    "(first name + last name). Return ONLY the name, nothing else. "
+    "Example: 'James Hartwell'"
+)
+
+PEER_NAME = "Alex"
+
 # ── Persona question-rewrite schemas ──────────────────────────────────────────
 
 _REWRITE_SCHEMA = {
@@ -135,24 +143,33 @@ class PersonaService:
 
     # ── Generate introduction ──────────────────────────────────────────────
 
-    async def generate_intro(self, persona: str) -> str:
+    async def generate_intro(self, persona: str) -> tuple[str, str]:
         """
         Generate a persona self-introduction paragraph.
-        Returns plain text (not JSON).
+        Returns (intro_text, persona_name).
         """
         if persona not in VALID_PERSONAS:
             raise ValueError(f"Invalid persona '{persona}'")
 
-        system = (
-            _INTRO_SYSTEM_PROFESSOR if persona == "professor" else _INTRO_SYSTEM_PEER
-        )
+        if persona == "professor":
+            name_raw = await chat_completion(
+                system_prompt=_NAME_SYSTEM_PROFESSOR,
+                user_prompt="Generate the name now.",
+                response_format="text",
+            )
+            name = name_raw.strip().strip('"').strip("'")
+            system = _INTRO_SYSTEM_PROFESSOR + f"\n\nYour name is Professor {name}. Use it naturally in your introduction."
+        else:
+            name = PEER_NAME
+            system = _INTRO_SYSTEM_PEER + f"\n\nYour name is {name}. Use it naturally in your introduction."
+
         intro = await chat_completion(
             system_prompt=system,
             user_prompt=_INTRO_USER,
             response_format="text",
         )
-        logger.info("Generated intro for persona '%s' (%d chars)", persona, len(intro))
-        return intro.strip()
+        logger.info("Generated intro for persona '%s' name='%s' (%d chars)", persona, name, len(intro))
+        return intro.strip(), name
 
     # ── Rewrite quiz question stems ────────────────────────────────────────
 

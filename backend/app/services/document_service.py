@@ -76,6 +76,21 @@ class DocumentService:
             "message": "Upload successful. Document processed.",
         }
 
+    @staticmethod
+    def _extract_markdown(file_path: str | Path) -> dict:
+        """Read a .md file and return the same shape as pdf_parser.extract()."""
+        raw_text = Path(file_path).read_text(encoding="utf-8")
+        if not raw_text.strip():
+            raise ValueError("Markdown file is empty.")
+        # Split on blank lines for paragraphs
+        paragraphs = [p.strip() for p in raw_text.split("\n\n") if p.strip()]
+        return {
+            "raw_text": raw_text,
+            "page_count": 1,
+            "paragraphs": paragraphs,
+            "sections": [],
+        }
+
     async def get_document(self, document_id: str) -> Document:
         result = await self.db.execute(
             select(Document).where(Document.id == uuid.UUID(document_id))
@@ -88,8 +103,12 @@ class DocumentService:
     # ── Internal processing ────────────────────────────────────────────────
 
     async def _process_document(self, document: Document) -> None:
-        # Extract text
-        parsed = pdf_parser.extract(document.file_path)
+        # Extract text — branch on file type
+        suffix = Path(document.file_path).suffix.lower()
+        if suffix == ".md":
+            parsed = self._extract_markdown(document.file_path)
+        else:
+            parsed = pdf_parser.extract(document.file_path)
         document.raw_text = parsed["raw_text"]
         document.page_count = parsed["page_count"]
         document.status = "parsed"

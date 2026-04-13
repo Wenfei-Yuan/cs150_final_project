@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # ── File Storage ──────────────────────────────────────────────────────
     UPLOAD_DIR: str = "uploads"
     MAX_FILE_SIZE_MB: int = 20
-    ALLOWED_EXTENSIONS: List[str] = ["pdf"]
+    ALLOWED_EXTENSIONS: List[str] = ["pdf", "md"]
 
     # ── LLM ───────────────────────────────────────────────────────────────
     OPENAI_API_KEY: str = ""

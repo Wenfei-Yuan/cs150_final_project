@@ -1,7 +1,9 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@plugin "@tailwindcss/typography";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/inter";
+@import "@fontsource/atkinson-hyperlegible";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -127,4 +129,37 @@
   html {
     @apply font-sans;
     }
+}
+
+/* ── Reading view typography ──────────────────────────────────────────────── */
+.reading-page {
+  background-color: #FAFAF7;
+  min-height: 100vh;
+}
+
+.reading-prose {
+  font-family: 'Atkinson Hyperlegible', sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  color: #2D2D2D;
+  max-width: 600px;
+  text-align: left;
+}
+
+.reading-prose p {
+  margin-bottom: 1.5em;
+}
+
+/* Override Tailwind prose defaults for reading view */
+.reading-prose.prose {
+  --tw-prose-body: #2D2D2D;
+  --tw-prose-headings: #2D2D2D;
+  --tw-prose-bold: #2D2D2D;
+  --tw-prose-links: #2D2D2D;
+  --tw-prose-code: #2D2D2D;
+  --tw-prose-counters: #2D2D2D;
+  --tw-prose-bullets: #2D2D2D;
+  --tw-prose-quotes: #2D2D2D;
+  max-width: 600px;
+  font-size: 16px;
 }

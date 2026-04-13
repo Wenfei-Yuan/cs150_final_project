@@ -23,6 +23,7 @@ class PersonaSelectRequest(BaseModel):
 class PersonaSelectResponse(BaseModel):
     session_id: str
     persona: str
+    name: str
     intro: str
 
 
@@ -32,6 +33,7 @@ class PersonaIntroRequest(BaseModel):
 
 class PersonaIntroResponse(BaseModel):
     persona: str
+    name: str
     intro: str
 
 
@@ -58,13 +60,14 @@ async def select_persona(
     svc = PersonaService(db)
     try:
         await svc.set_persona(payload.session_id, payload.persona)
-        intro = await svc.generate_intro(payload.persona)
+        intro, name = await svc.generate_intro(payload.persona)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
     return PersonaSelectResponse(
         session_id=payload.session_id,
         persona=payload.persona,
+        name=name,
         intro=intro,
     )
 
@@ -88,5 +91,5 @@ async def persona_intro(
             detail=f"Invalid persona '{payload.persona}'. Must be one of: {sorted(VALID_PERSONAS)}",
         )
     svc = PersonaService(db)
-    intro = await svc.generate_intro(payload.persona)
-    return PersonaIntroResponse(persona=payload.persona, intro=intro)
+    intro, name = await svc.generate_intro(payload.persona)
+    return PersonaIntroResponse(persona=payload.persona, name=name, intro=intro)

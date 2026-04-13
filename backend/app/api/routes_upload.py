@@ -67,19 +67,29 @@ async def get_document(document_id: str, db: AsyncSession = Depends(get_db)):
 @router.get("/{document_id}/full-text", summary="Get the full document text (no chunk boundaries)")
 async def get_full_text(document_id: str, db: AsyncSession = Depends(get_db)):
     """
-    Return the complete document text by concatenating all chunks in order.
-    The frontend uses this to display the article as a single unbroken flow
-    (no chunk boundaries shown to the user).
+    Return the complete document text.
+    For markdown files, returns the original raw text to preserve formatting.
+    For PDFs, reconstructs from chunks.
     """
     from sqlalchemy import select
     from app.db.models.chunk import Chunk
+    from app.db.models.document import Document
     import uuid as _uuid
 
     try:
         doc_uuid = _uuid.UUID(document_id)
     except ValueError:
-        from fastapi import HTTPException
         raise HTTPException(status_code=400, detail="Invalid document_id format")
+
+    doc_result = await db.execute(select(Document).where(Document.id == doc_uuid))
+    doc = doc_result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # For markdown, return raw_text to preserve original formatting
+    from pathlib import Path
+    if Path(doc.file_path).suffix.lower() == ".md" and doc.raw_text:
+        return {"document_id": document_id, "full_text": doc.raw_text}
 
     result = await db.execute(
         select(Chunk)
@@ -88,7 +98,6 @@ async def get_full_text(document_id: str, db: AsyncSession = Depends(get_db)):
     )
     chunks = result.scalars().all()
     if not chunks:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="No content found for this document")
 
     full_text = "\n\n".join(c.text for c in chunks)
