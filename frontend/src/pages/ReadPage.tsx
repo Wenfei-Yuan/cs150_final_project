@@ -5,7 +5,7 @@ import { toast } from 'sonner'
 import { api } from '@/lib/api'
 
 type Heading = { id: string; text: string }
-type Highlight = { id: string; text: string }
+type Highlight = { id: string; text: string; explanation?: string }
 
 function slugify(text: string) {
   return text.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-')
@@ -31,6 +31,9 @@ export default function ReadPage() {
   const [explanation, setExplanation] = useState<string | null>(null)
   const [explaining, setExplaining] = useState(false)
   const [explainPanelOpen, setExplainPanelOpen] = useState(false)
+  const [explainPhase, setExplainPhase] = useState(0)
+  const [explainFading, setExplainFading] = useState(false)
+  const [explainedText, setExplainedText] = useState<string | null>(null)
   const articleRef = useRef<HTMLDivElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
 
@@ -82,6 +85,27 @@ export default function ReadPage() {
     window.addEventListener('scroll', onScroll, { passive: true })
     return () => window.removeEventListener('scroll', onScroll)
   }, [headings])
+
+  const EXPLAIN_PHASES = [
+    'Reading the selected text…',
+    'Finding context in the document…',
+    'Connecting ideas…',
+    'Drafting an explanation…',
+    'Polishing the response…',
+  ]
+
+  useEffect(() => {
+    if (!explaining) { setExplainPhase(0); return }
+    const cycle = () => {
+      setExplainFading(true)
+      setTimeout(() => {
+        setExplainPhase((p) => (p + 1) % EXPLAIN_PHASES.length)
+        setExplainFading(false)
+      }, 300)
+    }
+    const id = setInterval(cycle, 1800)
+    return () => clearInterval(id)
+  }, [explaining])
 
   function scrollToHeading(id: string) {
     const el = document.getElementById(id)
@@ -160,6 +184,7 @@ export default function ReadPage() {
     setExplaining(true)
     setExplanation(null)
     setExplainPanelOpen(true)
+    setExplainedText(selection.text)
     const surroundingText = fullText ? (() => {
       const idx = fullText.indexOf(selection.text)
       if (idx === -1) return ''
@@ -176,6 +201,13 @@ export default function ReadPage() {
       setSelection(null)
       window.getSelection()?.removeAllRanges()
     }
+  }
+
+  function saveExplainToHighlights() {
+    if (!explainedText) return
+    const id = `hl-${Date.now()}`
+    setHighlights((prev) => [...prev, { id, text: explainedText, explanation: explanation ?? undefined }])
+    toast.success('Saved to highlights')
   }
 
   function handleTakeQuiz() {
@@ -256,9 +288,22 @@ export default function ReadPage() {
         {/* Center: article — always 600px */}
         <div>
           {loadingText ? (
-            <div className="space-y-3">
-              {[...Array(6)].map((_, i) => (
-                <div key={i} className={`h-4 rounded bg-muted animate-pulse ${i % 4 === 3 ? 'w-2/3' : 'w-full'}`} />
+            <div className="space-y-6 pt-2">
+              <div className="flex items-center gap-3 pb-2">
+                <div className="w-5 h-5 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin shrink-0" />
+                <span className="text-xs text-muted-foreground">Loading document…</span>
+              </div>
+              {[
+                ['w-full','w-full','w-full','w-5/6'],
+                ['w-full','w-full','w-4/5'],
+                ['w-full','w-full','w-full','w-2/3'],
+                ['w-full','w-3/4'],
+              ].map((group, gi) => (
+                <div key={gi} className="space-y-2.5">
+                  {group.map((w, li) => (
+                    <div key={li} className={`skeleton h-3.5 ${w}`} />
+                  ))}
+                </div>
               ))}
             </div>
           ) : (
@@ -303,13 +348,37 @@ export default function ReadPage() {
                 <button onClick={() => { setExplainPanelOpen(false); setExplanation(null) }} className="text-muted-foreground hover:text-foreground text-xs">✕</button>
               </div>
               {explaining ? (
-                <div className="space-y-2">
-                  {[...Array(4)].map((_, i) => (
-                    <div key={i} className={`h-3 rounded bg-muted animate-pulse ${i === 3 ? 'w-3/4' : 'w-full'}`} />
-                  ))}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-3.5 h-3.5 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin shrink-0" />
+                    <p
+                      className="text-xs text-muted-foreground transition-opacity duration-300"
+                      style={{ opacity: explainFading ? 0 : 1 }}
+                    >
+                      {EXPLAIN_PHASES[explainPhase]}
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    {['w-full','w-full','w-full','w-3/4'].map((w, i) => (
+                      <div key={i} className={`skeleton h-3 ${w}`} />
+                    ))}
+                  </div>
                 </div>
               ) : explanation ? (
-                <p className="text-sm leading-relaxed" style={{ color: '#2D2D2D' }}>{explanation}</p>
+                <div className="space-y-3">
+                  {explainedText && (
+                    <p className="text-xs text-muted-foreground italic border-l-2 border-border pl-2 leading-relaxed line-clamp-3">
+                      "{explainedText}"
+                    </p>
+                  )}
+                  <p className="text-sm leading-relaxed" style={{ color: '#2D2D2D' }}>{explanation}</p>
+                  <button
+                    onClick={saveExplainToHighlights}
+                    className="text-xs text-muted-foreground hover:text-foreground transition-colors border border-border rounded-md px-2.5 py-1 hover:bg-muted/40"
+                  >
+                    + Save to highlights
+                  </button>
+                </div>
               ) : null}
             </div>
           )}
@@ -317,7 +386,7 @@ export default function ReadPage() {
       </div>{/* end grid */}
 
       {/* Floating action popover on selection */}
-      {selection && !explainPanelOpen && (
+      {selection && (
         <div ref={popoverRef} style={{ position: 'absolute', top: selection.y, left: selection.x, transform: 'translate(-50%, -100%)', zIndex: 50 }}>
           <div className="flex items-center gap-1 rounded-lg bg-foreground shadow-lg p-1">
             <button
@@ -382,17 +451,24 @@ export default function ReadPage() {
               {highlights.length === 0 ? (
                 <p className="text-sm text-muted-foreground px-5 py-6 text-center">No highlights yet.</p>
               ) : highlights.map((h) => (
-                <div key={h.id} className="flex items-start gap-3 px-5 py-3 group hover:bg-muted/30 transition-colors">
-                  <span style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: '#FDE68A', flexShrink: 0, marginTop: 3 }} />
-                  <button
-                    onClick={() => { scrollToHighlight(h.id); setHighlightsPanelOpen(false) }}
-                    className="flex-1 text-left text-sm text-foreground leading-snug hover:underline"
-                  >
-                    {h.text}
-                  </button>
+                <div key={h.id} className="flex items-start gap-3 px-5 py-4 group hover:bg-muted/30 transition-colors">
+                  <span style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: '#FDE68A', flexShrink: 0, marginTop: 4 }} />
+                  <div className="flex-1 min-w-0 space-y-1.5">
+                    <button
+                      onClick={() => { scrollToHighlight(h.id); setHighlightsPanelOpen(false) }}
+                      className="text-left text-sm text-foreground leading-snug hover:underline w-full"
+                    >
+                      {h.text}
+                    </button>
+                    {h.explanation && (
+                      <p className="text-xs text-muted-foreground leading-relaxed border-l-2 border-border pl-2">
+                        {h.explanation}
+                      </p>
+                    )}
+                  </div>
                   <button
                     onClick={() => removeHighlight(h.id)}
-                    className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground text-xs transition-opacity shrink-0"
+                    className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground text-xs transition-opacity shrink-0 mt-0.5"
                   >
                     ✕
                   </button>
