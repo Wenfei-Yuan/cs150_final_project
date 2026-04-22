@@ -26,6 +26,7 @@ from app.api.routes_session import router as session_router
 from app.api.routes_learning_test import router as learning_test_router
 from app.api.routes_persona import router as persona_router
 from app.api.routes_explain import router as explain_router
+from app.api.routes_adhd import router as adhd_router
 
 logger = get_logger(__name__)
 
@@ -80,6 +81,8 @@ app.include_router(persona_router, prefix="/persona", tags=["persona"])
 app.include_router(explain_router, prefix="/explain", tags=["explain"])
 # Stage 5 — Comprehension quiz
 app.include_router(learning_test_router, prefix="/learning-test", tags=["learning-test"])
+# ADHD progressive reader (highlight / fade / normal + paragraph-by-paragraph reveal)
+app.include_router(adhd_router, prefix="/adhd", tags=["adhd"])
 
 # ── Global exception handlers ────────────────────────────────────────────────
 

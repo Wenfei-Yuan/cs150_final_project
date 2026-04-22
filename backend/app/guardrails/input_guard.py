@@ -90,7 +90,8 @@ class InputGuard:
         if ratio < threshold:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="您的研究目标似乎与当前文章内容关联度较低。请尝试提出与本文相关的问题，以便更好地完成本次阅读任务。"
+                detail="Your reading goal seems unrelated to the current document. "
+                       "Please ask questions relevant to this article to make the most of your reading session."
             )
 
     # ── Internal helpers ──────────────────────────────────────────────────

@@ -1,308 +1,260 @@
-# ADHD Reading Companion Backend
+# ADHD Reading Companion — Backend
 
-This README is aligned with the current backend codebase only (FastAPI service in `backend/app`).
+FastAPI + SQLAlchemy (async) + ChromaDB backend for an AI-powered reading companion designed for users with ADHD.
 
-## What This Backend Provides
+## Entry Point
 
-1. PDF upload, parsing, chunking, and indexing
-2. Three reading modes:
-   - `skim`
-   - `goal_directed`
-   - `deep_comprehension`
-3. A standalone `learning test` feature
-4. Long-term user memory/profile storage
-
-## Tech Snapshot
-
-- Framework: FastAPI (async)
-- ORM: SQLAlchemy async
-- Default local DB: SQLite (`reading_companion.db`)
-- Docker stack: PostgreSQL + Redis + FastAPI
-- Vector store: Chroma (default)
-- LLM outputs are parsed + schema-validated
-
-Main app entry: `app/main.py`
-
-- `/documents` routes: upload and document status
-- `/sessions` routes: reading sessions and mode interactions
-- `/users` routes: user memory
-- `/learning-test` routes: MCQ generation and scoring
-- `/eval` routes: dev/testing endpoints
-
-## Reading Modes
-
-Mode enum is defined in `app/schemas/mode.py`:
-
-- `skim`
-- `goal_directed`
-- `deep_comprehension`
-
-All sessions start with setup and mode recommendation:
-
-1. `POST /sessions` creates a new session (`status=setup`)
-2. `GET /sessions/setup-questions` returns the 3 setup questions
-3. `POST /sessions/{session_id}/setup` submits answers and gets recommended mode
-4. Optional override: `POST /sessions/{session_id}/mode-override`
-
-You can always check current state with:
-
-- `GET /sessions/{session_id}/current`
-- `GET /sessions/{session_id}/progress`
-
-### 1) Skim Mode (`skim`)
-
-Purpose: Quickly understand what the paper is about.
-
-Strategy profile (from code):
-
-- `allow_jump=True`
-- `retell_required=False`
-- `question_mode=self_assess`
-- `gating_mode=none`
-- `session_checkpoint=takeaway`
-
-Detailed flow:
-
-1. **Enter mode**
-   - After setup/override, session mode becomes `skim`.
-2. **Get paper-level overview**
-   - `GET /sessions/{session_id}/full-summary`
-   - Returns whole-paper summary fields (topic/question/method/findings).
-3. **Read current chunk packet**
-   - `GET /sessions/{session_id}/current`
-   - Returns current chunk + helper content.
-4. **Self-check comprehension**
-   - `POST /sessions/{session_id}/self-assess` with `understood=true|false`
-   - If `false`, user can ask a targeted question.
-5. **Ask question when confused**
-   - `POST /sessions/{session_id}/ask-question`
-   - Backend answers based on current chunk text.
-6. **Move forward**
-   - `POST /sessions/{session_id}/next`
-7. **Optional navigation jumps**
-   - `POST /sessions/{session_id}/jump`
-   - `POST /sessions/{session_id}/jump-back`
-8. **Finish session**
-   - `POST /sessions/{session_id}/takeaway`
-   - Returns encouraging feedback (no hard scoring gate).
-
-### 2) Goal-Directed Mode (`goal_directed`)
-
-Purpose: Find goal-relevant information as efficiently as possible.
-
-Strategy profile (from code):
-
-- `allow_jump=True`
-- `retell_required=False`
-- `question_mode=goal_helpfulness`
-- `gating_mode=none`
-- `session_checkpoint=goal_answer`
-
-Detailed flow:
-
-1. **Enter mode**
-   - Session mode becomes `goal_directed`.
-2. **Set explicit goal**
-   - `POST /sessions/{session_id}/goal` with free-text goal
-   - Backend ranks chunks by relevance and sets reading order.
-3. **Read goal-ranked chunks**
-   - `GET /sessions/{session_id}/current`
-4. **Chunk-level usefulness check**
-   - `POST /sessions/{session_id}/goal-check` with `helpful=true|false`
-   - Used to track whether this chunk contributed to the goal.
-5. **Advance through ranked order**
-   - `POST /sessions/{session_id}/next`
-6. **Optional navigation jumps**
-   - `POST /sessions/{session_id}/jump`
-   - `POST /sessions/{session_id}/jump-back`
-7. **Goal checkpoint at session end**
-   - `POST /sessions/{session_id}/takeaway`
-   - In this mode, takeaway is treated as goal-answer feedback input.
-   - Response includes supportive feedback and may include strengths/limitations.
-
-### 3) Deep Comprehension Mode (`deep_comprehension`)
-
-Purpose: Maximize understanding and retention with active recall.
-
-Strategy profile (from code):
-
-- `allow_jump=False` (free jump disabled; controlled section-level behavior)
-- `retell_required=True`
-- `question_mode=quiz`
-- `gating_mode=weak`
-- `chunk_checkpoint=True`
-- `section_checkpoint=True`
-- `session_checkpoint=takeaway`
-
-Detailed flow:
-
-1. **Enter mode**
-   - Session mode becomes `deep_comprehension`.
-2. **Read chunk in sequence**
-   - `GET /sessions/{session_id}/current`
-3. **Retell checkpoint**
-   - `POST /sessions/{session_id}/retell` with free-text retell
-   - Empty text is accepted (skip behavior exists in schema/service logic).
-4. **Quiz generation**
-   - `GET /sessions/{session_id}/quiz`
-   - Question type is randomized by backend (`true_false`, `multiple_choice`, `fill_blank`).
-5. **Submit quiz answers**
-   - `POST /sessions/{session_id}/quiz-answer`
-   - Returns correctness per question + explanation and wrong-answer options.
-6. **If answer is wrong, choose action**
-   - `POST /sessions/{session_id}/quiz-action` with:
-     - `retry`
-     - `mark_for_later`
-     - `skip`
-7. **Advance**
-   - `POST /sessions/{session_id}/next`
-8. **Repeat for remaining chunks/sections**
-9. **Finish session**
-   - `POST /sessions/{session_id}/takeaway`
-   - Returns supportive end feedback.
-
-## Learning Test Feature
-
-Route file: `app/api/routes_learning_test.py`  
-Service file: `app/services/learning_test_service.py`
-
-`learning test` is independent from the per-session mode loop.
-
-### Behavior
-
-- Generates exactly 9 MCQs from a document
-- Difficulty split is fixed:
-  - 3 `easy`
-  - 3 `medium`
-  - 3 `hard`
-- Each question has exactly 4 options and one correct answer (`A/B/C/D`)
-- On submission, backend returns:
-  - total score
-  - max score
-  - per-question correctness
-  - per-question explanation
-  - overall feedback
-- Score is persisted into user profile (`common_mistakes.test_scores`)
-
-### API
-
-1. Generate test
-
-- `POST /learning-test/generate`
-
-Example request:
-
-```json
-{
-  "document_id": "<document_uuid>",
-  "user_id": "1"
-}
+```
+backend/app/main.py
 ```
 
-2. Submit answers and get score
+Start the server (run from the `backend/` directory):
 
-- `POST /learning-test/submit`
+```bash
+cd backend
+uvicorn app.main:app --reload --port 8000
+```
 
-Example request:
+Once running:
+- Interactive API docs (Swagger): http://localhost:8000/docs
+- Health check: http://localhost:8000/health
+
+---
+
+## Setup
+
+```bash
+# 1. Create and activate a virtual environment from the project root
+python -m venv .venv
+source .venv/bin/activate      # macOS / Linux
+
+# 2. Install dependencies
+cd backend
+pip install -r requirements.txt
+```
+
+Key configuration options (defaults in `backend/app/core/config.py`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATABASE_URL` | `sqlite+aiosqlite:///./reading_companion.db` | SQLite (dev) or PostgreSQL (prod) |
+| `CHROMA_PERSIST_DIR` | `./chroma_db` | ChromaDB vector store directory |
+| `UPLOAD_DIR` | `uploads` | PDF / Markdown upload directory |
+| `OPENAI_MODEL` | `gpt-5-mini` | LLM model (called via school LLMProxy) |
+| `LLM_TEMPERATURE` | `0.2` | LLM temperature |
+
+---
+
+## Directory Structure
+
+```
+backend/
+├── app/
+│   ├── main.py                      ← Entry point; registers all routers
+│   ├── api/
+│   │   ├── routes_upload.py         POST /documents/upload
+│   │   ├── routes_session.py        POST /sessions
+│   │   ├── routes_persona.py        POST /persona/select
+│   │   ├── routes_explain.py        POST /explain/selection
+│   │   ├── routes_learning_test.py  POST /learning-test/*
+│   │   └── routes_adhd.py           GET  /adhd/chunks/{id}
+│   │                                POST /adhd/annotate     ← ADHD (new)
+│   ├── services/
+│   │   ├── document_service.py
+│   │   ├── section_chunking_service.py
+│   │   ├── chunk_service.py
+│   │   ├── rag_service.py
+│   │   ├── explain_service.py
+│   │   ├── learning_test_service.py
+│   │   ├── persona_service.py
+│   │   └── adhd_annotation_service.py  ← ADHD (new)
+│   ├── schemas/
+│   │   └── adhd.py                  ← ADHD (new)
+│   ├── db/models/                   ORM models (Document, Chunk, ReadingSession…)
+│   ├── llm/
+│   │   ├── client.py                LLMProxy wrapper (chat_completion_json, etc.)
+│   │   └── embeddings.py
+│   └── guardrails/
+│       ├── input_guard.py
+│       ├── output_guard.py
+│       └── grounding_guard.py
+├── requirements.txt
+└── README.md
+```
+
+---
+
+## Full API Reference
+
+### Core Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/documents/upload` | Upload PDF / Markdown; triggers parsing, chunking, and vectorization |
+| `GET` | `/documents/{id}` | Poll document status (uploaded → chunked → indexed) |
+| `GET` | `/documents/{id}/full-text` | Get full document text |
+| `GET` | `/documents/{id}/pdf` | Download original PDF |
+| `POST` | `/sessions` | Create a reading session (binds user_id + document_id) |
+| `GET` | `/sessions/{id}` | Get session info |
+| `POST` | `/persona/select` | Select a persona (professor / peer) and generate its intro |
+| `POST` | `/persona/intro` | Generate persona intro separately |
+| `POST` | `/explain/selection` | Explain highlighted text (neutral tone) |
+| `POST` | `/learning-test/generate` | Generate 9 MCQ questions |
+| `POST` | `/learning-test/answer` | Save a single answer |
+| `POST` | `/learning-test/submit` | Submit quiz; returns score and per-question explanations |
+
+### ADHD Progressive Reading (New)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/adhd/chunks/{document_id}` | Return all chunks for a document, each split into a list of paragraphs |
+| `POST` | `/adhd/annotate` | Receive currently visible paragraphs; return per-sentence highlight / fade / normal labels |
+
+---
+
+## ADHD Feature Details
+
+### Progressive Reading (frontend-driven, backend provides data)
+
+Documents are paged by existing **chunk boundaries**. `GET /adhd/chunks/{document_id}` splits each chunk's text on `\n\n` into a paragraph list. The frontend displays one paragraph at a time — clicking **Read More** reveals the next paragraph within the current chunk; clicking **Next Page** advances to the next chunk and resets to its first paragraph.
+
+### Sentence Importance Annotation Pipeline (`POST /adhd/annotate`)
+
+```
+Frontend sends visible_blocks (list of paragraphs currently on screen)
+        |
+  Split into a flat sentence list
+  (fixed regex, must match frontend split to guarantee positional alignment)
+        |
+  RAG retrieval: fetch top-3 relevant chunks from ChromaDB as full-document context
+  (helps LLM judge each sentence's importance relative to the whole document)
+        |
+  LLM scoring: assign highlight / fade / normal label to each sentence
+        |
+  Guardrail enforcement: highlight ≤ 30%, fade ≤ 20%
+  (excess sentences demoted to normal from the tail — prevents screen flooding)
+        |
+  Return annotations list (order matches input sentences 1-to-1)
+```
+
+`/adhd/annotate` is called on every **Read More** click, passing all currently visible paragraphs (including the newly revealed one). Importance weights are redistributed across all visible content each time.
+
+### Label Meanings
+
+| Label | Meaning | Suggested rendering |
+|-------|---------|---------------------|
+| `highlight` | Core argument / key definition / section claim | Yellow background `#FEF08A` |
+| `fade` | Minor detail / aside / statistic | Gray text + reduced opacity |
+| `normal` | Regular explanatory text | No special style |
+
+---
+
+## Example Requests
+
+### `GET /adhd/chunks/{document_id}`
+
+```bash
+curl http://localhost:8000/adhd/chunks/3fa85f64-5717-4562-b3fc-2c963f66afa6
+```
 
 ```json
 {
-  "document_id": "<document_uuid>",
-  "user_id": "1",
-  "questions": [
+  "document_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "total_chunks": 8,
+  "chunks": [
     {
-      "id": "q1",
-      "question": "...",
-      "difficulty": "easy",
-      "options": ["A. ...", "B. ...", "C. ...", "D. ..."],
-      "correct_answer": "A"
-    }
-  ],
-  "answers": [
-    {
-      "question_id": "q1",
-      "selected": "B"
+      "chunk_index": 0,
+      "chunk_id": "c1d2e3f4-...",
+      "section": "Introduction",
+      "paragraphs": [
+        "Attention deficit hyperactivity disorder (ADHD) affects roughly 5% of adults worldwide.",
+        "Previous research has shown that chunked reading reduces cognitive overload significantly."
+      ]
     }
   ]
 }
 ```
 
-## Core Backend Endpoints
+### `POST /adhd/annotate`
 
-### Documents
+```bash
+curl -X POST http://localhost:8000/adhd/annotate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "document_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "visible_blocks": [
+      "Attention deficit hyperactivity disorder (ADHD) affects roughly 5% of adults worldwide.",
+      "Previous research has shown that chunked reading reduces cognitive overload significantly."
+    ]
+  }'
+```
 
-- `POST /documents/upload`
-- `GET /documents/{document_id}`
-- `GET /documents/{document_id}/pdf`
+```json
+{
+  "annotations": [
+    {
+      "text": "Attention deficit hyperactivity disorder (ADHD) affects roughly 5% of adults worldwide.",
+      "label": "highlight"
+    },
+    {
+      "text": "Previous research has shown that chunked reading reduces cognitive overload significantly.",
+      "label": "normal"
+    }
+  ]
+}
+```
 
-### Session Setup + Navigation
+---
 
-- `POST /sessions`
-- `GET /sessions/setup-questions`
-- `POST /sessions/{session_id}/setup`
-- `POST /sessions/{session_id}/mode-override`
-- `GET /sessions/{session_id}/mind-map`
-- `GET /sessions/{session_id}/current`
-- `POST /sessions/{session_id}/next`
-- `POST /sessions/{session_id}/jump`
-- `POST /sessions/{session_id}/jump-back`
-- `POST /sessions/{session_id}/skip`
-- `GET /sessions/{session_id}/progress`
-- `GET /sessions/{session_id}/history`
+## New Files (ADHD Feature)
 
-### Mode-Specific Interactions
+| File | Description |
+|------|-------------|
+| `app/schemas/adhd.py` | Pydantic schemas: `AnnotationLabel`, `AnnotateRequest/Response`, `ChunksResponse` |
+| `app/services/adhd_annotation_service.py` | Annotation service: RAG + LLM + Guardrail pipeline |
+| `app/api/routes_adhd.py` | Routes for `/adhd/chunks` and `/adhd/annotate` |
+| `app/main.py` | Added `adhd_router` registration (all other code unchanged) |
 
-- `GET /sessions/{session_id}/full-summary`
-- `POST /sessions/{session_id}/self-assess`
-- `POST /sessions/{session_id}/ask-question`
-- `POST /sessions/{session_id}/goal`
-- `POST /sessions/{session_id}/goal-check`
-- `POST /sessions/{session_id}/retell`
-- `GET /sessions/{session_id}/quiz`
-- `POST /sessions/{session_id}/quiz-answer`
-- `POST /sessions/{session_id}/quiz-action`
-- `POST /sessions/{session_id}/takeaway`
+---
 
-### Learning Test + User Memory
+## Database
 
-- `POST /learning-test/generate`
-- `POST /learning-test/submit`
-- `GET /users/{user_id}/memory`
+Defaults to **SQLite** (development/demo); file is created automatically:
 
-### Infra
+```
+backend/reading_companion.db
+```
 
-- `GET /health`
+To switch to PostgreSQL (Docker):
 
-## Run Backend Locally
+```bash
+docker-compose up -d db
+# Set in .env:
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/reading_companion
+```
+
+Tables are created automatically on startup (`Base.metadata.create_all`). Use Alembic migrations for production.
+
+---
+
+## Running Tests
 
 ```bash
 cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+pytest tests/ -v
 ```
 
-- API base: `http://localhost:8000`
-- Swagger: `http://localhost:8000/docs`
+---
 
-## Run with Docker
+## Key Dependencies
 
-```bash
-cd backend
-docker compose up --build
-```
+| Component | Purpose |
+|-----------|---------|
+| FastAPI | Web framework |
+| SQLAlchemy (async) | ORM |
+| aiosqlite / asyncpg | Database drivers |
+| ChromaDB | Local vector store (RAG) |
+| LLMProxy | School-provided LLM proxy |
+| pdfplumber | PDF text extraction |
+| pydantic-settings | Environment variable management |
 
-Ports:
-
-- backend: `8000`
-- postgres: `5432`
-- redis: `6379`
-
-## Tests
-
-```bash
-cd backend
-pytest tests -v
-```
