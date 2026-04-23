@@ -1,13 +1,16 @@
 """
-ADHD Reading Companion — ADHD Reader Demo CLI
+ADHD Reading Companion — Demo CLI
 
-Flow:
-  Stage 1: Upload a PDF or Markdown file
-  Stage 2: Enter your name (creates a reading session)
-  Stage 3: ADHD Progressive Reading
+3-stage flow (mirrors app/main.py):
+  Stage 1: Upload a PDF or Markdown file        POST /documents/upload
+  Stage 2: Enter your name (creates a session)  POST /sessions
+  Stage 3: ADHD Progressive Reading             GET  /adhd/chunks/{doc_id}
+                                                POST /adhd/annotate
            - Navigate chunk by chunk with [n]ext page
            - Reveal paragraph by paragraph with [r]ead more
            - Each reveal re-annotates all visible text (highlight / fade / normal)
+           - [e] Explain — paste any passage for inline AI explanation
+                           POST /explain/selection
 
 Colour key:
   Bold yellow  = highlight  (core argument / key definition)
@@ -307,6 +310,22 @@ def _print_reader_screen(chunk_idx, total_chunks, section_name, visible_blocks, 
     print(bold("  " + "─" * 56))
 
 
+def _explain_text(selected_text, surrounding_text=""):
+    """Call POST /explain/selection and return the explanation string, or None on error."""
+    status, payload = http_request(
+        "POST", "/explain/selection",
+        json_body={
+            "document_id": STATE["document_id"],
+            "selected_text": selected_text,
+            "surrounding_text": surrounding_text,
+        },
+    )
+    if status and 200 <= status < 300:
+        return payload.get("explanation")
+    detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+    return None, detail
+
+
 def stage3_adhd_read():
     section("Stage 3 — ADHD Progressive Reader")
 
@@ -344,31 +363,69 @@ def stage3_adhd_read():
             has_more_paras = visible_count < len(paragraphs)
             has_next_chunk = chunk_idx + 1 < len(chunks)
             at_last_para   = not has_more_paras
+            is_last_content = at_last_para and not has_next_chunk
 
             # Build command hint
             cmds = []
             if has_more_paras:
                 cmds.append(cyan("[r] Read More"))
-            if at_last_para and has_next_chunk:
+            if not is_last_content:
+                # Next Page continues unread paragraphs first, then advances chunk
                 cmds.append(cyan("[n] Next Page"))
-            elif has_next_chunk:
-                cmds.append(cyan("[n] Next Page"))
+            cmds.append(cyan("[e] Explain"))
             cmds.append(cyan("[q] Quit"))
 
             print("  " + "  |  ".join(cmds))
             cmd = input(bold("  > ")).strip().lower()
 
+            if cmd == "e":
+                print()
+                print(bold("  Explain a passage"))
+                print(dim("  Type or paste the text you want explained (press Enter twice to confirm):"))
+                lines = []
+                while True:
+                    line = input()
+                    if line == "" and lines:
+                        break
+                    lines.append(line)
+                selected = " ".join(lines).strip()
+                if not selected:
+                    warn("No text entered — cancelling.")
+                    continue
+                # Build surrounding context from currently visible blocks
+                surrounding = "\n".join(visible_blocks)
+                info("Asking AI for an explanation…")
+                result = _explain_text(selected, surrounding)
+                print()
+                if isinstance(result, tuple):
+                    err(f"Explain failed: {result[1]}")
+                elif result:
+                    print(bold("  ─── Explanation ───────────────────────────────────"))
+                    print(_wrap(result, width=76, indent="  "))
+                    print(bold("  ────────────────────────────────────────────────────"))
+                else:
+                    warn("No explanation returned.")
+                print()
+                input(dim("  Press Enter to continue reading…"))
+                continue
+
             if cmd in ("r", "") and has_more_paras:
                 visible_count += 1
                 continue
 
-            if cmd == "n" and has_next_chunk:
-                chunk_idx += 1
-                break
-
-            if cmd == "n" and not has_next_chunk:
-                warn("You are already on the last page.")
-                continue
+            if cmd == "n":
+                if has_more_paras:
+                    # Don't skip unread paragraphs — continue in current chunk
+                    visible_count += 1
+                    continue
+                elif has_next_chunk:
+                    # All paragraphs read, advance to next chunk
+                    chunk_idx += 1
+                    break
+                else:
+                    warn("You have finished reading the document!")
+                    ok("Thanks for reading! Goodbye.")
+                    return
 
             if cmd == "r" and not has_more_paras:
                 # User pressed r but all paragraphs shown — act as next page

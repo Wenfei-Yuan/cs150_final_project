@@ -122,6 +122,30 @@ def main():
     if not ok:
         return
 
+    # Step 8: Explain a selection from the current chunk
+    chunk_text = ""
+    if isinstance(payload, dict):
+        chunk_text = (
+            payload.get("content")
+            or payload.get("text")
+            or payload.get("chunk_text")
+            or ""
+        )
+    # Use first 200 chars of the chunk as the "selected" text (or a fallback phrase)
+    selected_text = chunk_text[:200].strip() if chunk_text else "ADHD affects reading comprehension"
+    surrounding_text = chunk_text[:500].strip() if chunk_text else ""
+    ok, payload = step(
+        "Explain selection",
+        *http_request(
+            "POST", "/explain/selection",
+            json_body={
+                "document_id": doc_id,
+                "selected_text": selected_text,
+                "surrounding_text": surrounding_text,
+            },
+        ),
+    )
+
     # Mode-specific actions
     if mode == "deep_comprehension":
         # Step 8: Submit retell

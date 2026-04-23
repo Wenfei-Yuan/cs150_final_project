@@ -29,7 +29,8 @@ _EXPLAIN_SYSTEM = (
     "- Do NOT adopt any persona (not a professor, not a peer, not a tutor).\n"
     "- Do NOT answer questions unrelated to the highlighted text.\n"
     "- Do NOT reveal quiz answers, generate quiz questions, or speculate about test content.\n"
-    "- Keep explanations clear, concise, and grounded in the provided document context.\n"
+    "- Keep explanations short and focused: 2–4 sentences maximum. Do not over-explain.\n"
+    "- Each sentence must be brief and easy to read; avoid long, complex sentences.\n"
     "- Write in plain prose (no bullet lists unless necessary for clarity)."
 )
 
@@ -44,7 +45,7 @@ Relevant context retrieved from the document:
 {context}
 \"\"\"
 
-Please explain the highlighted passage clearly and concisely so the reader can understand it better.
+Please explain the highlighted passage in 2–4 short, plain sentences. Each sentence should be concise and easy to read at a glance.
 """
 
 
