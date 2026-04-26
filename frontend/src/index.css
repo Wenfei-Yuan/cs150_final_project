@@ -169,10 +169,11 @@
 }
 
 .reading-prose {
-  font-family: 'Atkinson Hyperlegible', sans-serif;
+  font-family: 'Be Vietnam Pro', sans-serif;
   font-size: 16px;
-  line-height: 1.6;
-  color: #2D2D2D;
+  line-height: 1.8;
+  font-weight: 300;
+  color: #64748B;
   max-width: 600px;
   text-align: left;
 }
@@ -183,14 +184,15 @@
 
 /* Override Tailwind prose defaults for reading view */
 .reading-prose.prose {
-  --tw-prose-body: #2D2D2D;
-  --tw-prose-headings: #2D2D2D;
-  --tw-prose-bold: #2D2D2D;
-  --tw-prose-links: #2D2D2D;
-  --tw-prose-code: #2D2D2D;
-  --tw-prose-counters: #2D2D2D;
-  --tw-prose-bullets: #2D2D2D;
-  --tw-prose-quotes: #2D2D2D;
+  --tw-prose-body: #64748B;
+  --tw-prose-headings: #0F172A;
+  --tw-prose-bold: #334155;
+  --tw-prose-links: #334155;
+  --tw-prose-code: #334155;
+  --tw-prose-counters: #64748B;
+  --tw-prose-bullets: #94A3B8;
+  --tw-prose-quotes: #64748B;
   max-width: 600px;
   font-size: 16px;
+  font-weight: 300;
 }

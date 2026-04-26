@@ -46,12 +46,12 @@ export default function ReadPage() {
   const [explainPhase, setExplainPhase] = useState(0)
   const [explainFading, setExplainFading] = useState(false)
   const [explainedText, setExplainedText] = useState<string | null>(null)
-  const [annotationMap, setAnnotationMap] = useState<Map<string, 'highlight' | 'fade' | 'normal'> | null>(null)
+  const [annotationMap, setAnnotationMap] = useState<Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null>(null)
   const [visibleCount, setVisibleCount] = useState(1)
   const [revealing, setRevealing] = useState(false)
   const [allRevealUnits, setAllRevealUnits] = useState<string[]>([])
   const [loadingChunks, setLoadingChunks] = useState(true)
-  const preloadCache = useRef(new Map<number, Map<string, 'highlight' | 'fade' | 'normal'>>())
+  const preloadCache = useRef(new Map<number, Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }>>())
   const articleRef = useRef<HTMLDivElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
 
@@ -76,8 +76,10 @@ export default function ReadPage() {
   }, [documentId])
 
   function buildAnnotationMap(res: Awaited<ReturnType<typeof api.annotateText>>) {
-    const map = new Map<string, 'highlight' | 'fade' | 'normal'>()
-    res.annotations.forEach(({ text, label }) => map.set(text.trim().replace(/\s+/g, ' '), label))
+    const map = new Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }>()
+    res.annotations.forEach(({ text, label, key_phrases }) =>
+      map.set(text.trim().replace(/\s+/g, ' '), { label: label as 'fade' | 'normal', keyPhrases: key_phrases ?? [] })
+    )
     return map
   }
 
@@ -301,22 +303,55 @@ export default function ReadPage() {
     )
   }
 
+  function renderWithKeyPhrases(text: string, keyPhrases: string[]) {
+    if (keyPhrases.length === 0) return <>{text}</>
+    const ranges: Array<{ start: number; end: number }> = []
+    for (const phrase of keyPhrases) {
+      const idx = text.toLowerCase().indexOf(phrase.toLowerCase())
+      if (idx !== -1) ranges.push({ start: idx, end: idx + phrase.length })
+    }
+    if (ranges.length === 0) return <>{text}</>
+    ranges.sort((a, b) => a.start - b.start)
+    const merged: typeof ranges = []
+    for (const r of ranges) {
+      if (merged.length && r.start <= merged[merged.length - 1].end)
+        merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, r.end)
+      else merged.push({ ...r })
+    }
+    const segments: Array<{ text: string; isKey: boolean }> = []
+    let cursor = 0
+    for (const { start, end } of merged) {
+      if (start > cursor) segments.push({ text: text.slice(cursor, start), isKey: false })
+      segments.push({ text: text.slice(start, end), isKey: true })
+      cursor = end
+    }
+    if (cursor < text.length) segments.push({ text: text.slice(cursor), isKey: false })
+    return (
+      <>
+        {segments.map((seg, i) =>
+          seg.isKey
+            ? <span key={i} style={{ fontWeight: 700, color: '#0F172A' }}>{seg.text}</span>
+            : <span key={i}>{seg.text}</span>
+        )}
+      </>
+    )
+  }
+
   function annotatedParagraph(text: string) {
     const sentences = splitSentences(text)
     if (!annotationMap || sentences.length === 0) return <>{text}</>
     return (
       <>
         {sentences.map((s, i) => {
-          const label = annotationMap.get(s.trim().replace(/\s+/g, ' '))
+          const entry = annotationMap.get(s.trim().replace(/\s+/g, ' '))
+          const label = entry?.label
+          const keyPhrases = entry?.keyPhrases ?? []
           return (
             <span
               key={i}
-              style={{
-                ...(label === 'highlight' ? { fontWeight: 700, color: '#111827', backgroundColor: '#FEF3C7', borderRadius: '2px', padding: '0 1px' } : {}),
-                ...(label === 'fade' ? { color: '#9CA3AF', fontWeight: 400 } : {}),
-              }}
+              style={label === 'normal' ? { fontWeight: 300, color: '#0F172A' } : {}}
             >
-              {s}{i < sentences.length - 1 ? ' ' : ''}
+              {renderWithKeyPhrases(s, keyPhrases)}{i < sentences.length - 1 ? ' ' : ''}
             </span>
           )
         })}

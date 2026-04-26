@@ -94,22 +94,27 @@ class DocumentService:
     @staticmethod
     def _normalize_md_paragraphs(paragraphs: list[str]) -> list[str]:
         """
-        1. Merge preamble blocks (before the first # heading) into one block
-           so that title/authors/affiliations don't each become their own chunk.
+        1. Merge leading metadata/preamble paragraphs into one block.
+           A paragraph is 'preamble' if it has fewer than 50 words and doesn't
+           start with a # heading — handles files with or without # headings.
         2. Merge standalone # heading lines with the following content paragraph
            so that a heading never surfaces as a lone reveal unit.
         """
         if not paragraphs:
             return paragraphs
 
-        # Step 1: collapse preamble
-        first_heading = next(
-            (i for i, p in enumerate(paragraphs) if p.startswith("#")),
-            None,
-        )
-        if first_heading and first_heading > 0:
-            preamble = "\n\n".join(paragraphs[:first_heading])
-            paragraphs = [preamble] + paragraphs[first_heading:]
+        # Step 1: collect leading short (metadata) paragraphs until we hit a
+        # heading or a substantial content paragraph (>= 50 words).
+        first_content = len(paragraphs)
+        for i, p in enumerate(paragraphs):
+            stripped = p.strip()
+            if stripped.startswith("##") or len(stripped.split()) >= 50:
+                first_content = i
+                break
+
+        if first_content > 1:
+            preamble = "\n\n".join(paragraphs[:first_content])
+            paragraphs = [preamble] + paragraphs[first_content:]
 
         # Step 2: merge standalone heading lines with the following paragraph
         result: list[str] = []
@@ -118,7 +123,7 @@ class DocumentService:
             para = paragraphs[i]
             is_lone_heading = (
                 para.startswith("#")
-                and "\n" not in para.strip()  # single line only
+                and "\n" not in para.strip()
             )
             if is_lone_heading and i + 1 < len(paragraphs):
                 next_para = paragraphs[i + 1]

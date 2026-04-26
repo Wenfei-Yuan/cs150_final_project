@@ -12,14 +12,14 @@ from pydantic import BaseModel, Field
 
 
 class AnnotationLabel(str, Enum):
-    highlight = "highlight"   # key idea / main claim  → yellow background
-    fade = "fade"             # peripheral detail       → dimmed / greyed out
-    normal = "normal"         # regular text            → no decoration
+    fade = "fade"     # peripheral detail  → slate-500, light
+    normal = "normal" # important context  → slate-700, regular
 
 
 class SentenceAnnotation(BaseModel):
     text: str
     label: AnnotationLabel
+    key_phrases: list[str] = []  # verbatim substrings that are the core idea → black, medium
 
 
 # ── POST /adhd/annotate ───────────────────────────────────────────────────────

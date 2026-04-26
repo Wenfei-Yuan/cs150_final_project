@@ -45,13 +45,11 @@ def split_sentences(text: str) -> list[str]:
 
 
 # ── Score / label thresholds ──────────────────────────────────────────────────
-_HIGHLIGHT_THRESH = 0.65   # score >= this → highlight (bold)
-_FADE_THRESH      = 0.50   # score <  this → fade (most supporting text)
-_MAX_HIGHLIGHT    = 0.30   # guardrail: at most 30 % of sentences
-_MAX_FADE         = 0.60   # guardrail: at most 60 % of sentences
-_EMA_ALPHA        = 0.4    # exponential smoothing weight for new score
+_FADE_THRESH  = 0.60   # score < this → fade (slate-500, light) — most text
+_MAX_NON_FADE = 0.30   # guardrail: normal (important) sentences ≤ 35 %
+_EMA_ALPHA    = 0.4    # exponential smoothing weight for new score
 
-_VALID_LABELS = {"highlight", "fade", "normal"}
+_VALID_LABELS = {"fade", "normal"}
 
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -106,11 +104,13 @@ For each sentence assign a score between 0 and 1 representing its importance:
 
 Important rules:
 - Do NOT assign the same score to all sentences.
-- Only a minority of sentences should score above 0.7.
+- Assign at least 70% of sentences a score below 0.60 — most text is supporting detail.
+- The band 0.60–1.0 is for sentences worth reading carefully; reserve it for ≤ 30% of sentences.
 - Numeric-heavy or detail-heavy sentences should usually score lower unless critical.
 - Structural sentences (introductions, transitions, conclusions) score higher.
 - Prefer smooth distributions; avoid extreme scores unless clearly justified.
 - Avoid drastic changes compared to previous annotations.
+- For key_phrases: extract 0–2 verbatim substrings (3–8 words) that are the single most important idea in the sentence. Most sentences (≥ 80%) should have an empty list. Only pull phrases that represent a core claim or key finding.
 
 ---
 
@@ -118,7 +118,7 @@ Important rules:
 Return ONLY a valid JSON array — no markdown fences, no explanations.
 
 Each item must be exactly:
-{{"sentenceId": string, "score": number}}
+{{"sentenceId": string, "score": number, "key_phrases": [string]}}
 """
 
 
@@ -190,11 +190,11 @@ class ADHDAnnotationService:
             user_prompt=user_prompt,
         )
 
-        # 6. Parse scores and optionally smooth with previous values
-        scores = self._parse_scores(raw, sentences, previous_scores)
+        # 6. Parse scores + key phrases, optionally smooth with previous values
+        scores, key_phrases_map = self._parse_llm_output(raw, sentences, previous_scores)
 
         # 7. Convert to labels and apply guardrail
-        annotations = self._scores_to_annotations(sentences, scores)
+        annotations = self._scores_to_annotations(sentences, scores, key_phrases_map)
         return self._enforce_limits(annotations)
 
     # ── Private helpers ───────────────────────────────────────────────────────
@@ -213,18 +213,16 @@ class ADHDAnnotationService:
             logger.warning("RAG retrieval failed (non-fatal): %s", exc)
             return ""
 
-    def _parse_scores(
+    def _parse_llm_output(
         self,
         raw: object,
         sentences: list[str],
         previous_scores: dict[str, float] | None,
-    ) -> list[float]:
+    ) -> tuple[list[float], dict[str, list[str]]]:
         """
-        Map LLM output (sentenceId + score) back to our sentence list.
-
-        If previous_scores are provided, applies exponential smoothing so
-        sudden annotation flips are damped:
-            new_score = alpha * llm_score + (1 - alpha) * prev_score
+        Extract scores and key_phrases from LLM output.
+        Applies exponential smoothing when previous_scores are provided.
+        Returns (scores_per_sentence, key_phrases_by_sentence_id).
         """
         if isinstance(raw, list):
             items = raw
@@ -233,8 +231,8 @@ class ADHDAnnotationService:
         else:
             items = []
 
-        # Build id → score map from LLM output
         id_to_score: dict[str, float] = {}
+        id_to_phrases: dict[str, list[str]] = {}
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -242,11 +240,14 @@ class ADHDAnnotationService:
             score = item.get("score")
             if sid and isinstance(score, (int, float)):
                 id_to_score[sid] = float(max(0.0, min(1.0, score)))
+            kp = item.get("key_phrases", [])
+            if sid and isinstance(kp, list):
+                id_to_phrases[sid] = [p for p in kp if isinstance(p, str) and p.strip()]
 
         scores: list[float] = []
         for i in range(len(sentences)):
             sid = f"s{i + 1}"
-            llm_score = id_to_score.get(sid, 0.5)   # default: neutral
+            llm_score = id_to_score.get(sid, 0.5)
             if previous_scores and sid in previous_scores:
                 prev = float(max(0.0, min(1.0, previous_scores[sid])))
                 smoothed = _EMA_ALPHA * llm_score + (1 - _EMA_ALPHA) * prev
@@ -254,52 +255,42 @@ class ADHDAnnotationService:
                 smoothed = llm_score
             scores.append(smoothed)
 
-        return scores
+        return scores, id_to_phrases
 
     @staticmethod
     def _scores_to_annotations(
-        sentences: list[str], scores: list[float]
+        sentences: list[str],
+        scores: list[float],
+        key_phrases_map: dict[str, list[str]],
     ) -> list[dict]:
-        """Convert per-sentence scores to highlight / fade / normal labels."""
+        """Convert per-sentence scores to fade / normal labels, attaching key phrases."""
         result = []
-        for sentence, score in zip(sentences, scores):
-            if score >= _HIGHLIGHT_THRESH:
-                label = "highlight"
-            elif score < _FADE_THRESH:
-                label = "fade"
-            else:
-                label = "normal"
-            result.append({"text": sentence, "label": label, "score": score})
+        for i, (sentence, score) in enumerate(zip(sentences, scores)):
+            label = "fade" if score < _FADE_THRESH else "normal"
+            sid = f"s{i + 1}"
+            # key_phrases only attach to normal sentences so they stay contextually anchored
+            phrases = key_phrases_map.get(sid, []) if label == "normal" else []
+            result.append({
+                "text": sentence,
+                "label": label,
+                "score": score,
+                "key_phrases": phrases,
+            })
         return result
 
     def _enforce_limits(self, annotations: list[dict]) -> list[dict]:
-        """
-        Guardrail: cap extreme proportions by demoting the lowest-scoring
-        excess sentences to "normal".  Ensures the UI is never overwhelmed.
-        """
+        """Guardrail: cap normal (important) sentences at 30 % of total."""
         n = len(annotations)
         if n == 0:
             return annotations
 
-        max_h = max(1, round(n * _MAX_HIGHLIGHT))
-        max_f = max(1, round(n * _MAX_FADE))
         result = list(annotations)
+        max_normal = max(1, round(n * _MAX_NON_FADE))
+        normals = [i for i, a in enumerate(result) if a["label"] == "normal"]
+        if len(normals) > max_normal:
+            # Demote lowest-scoring normals to fade
+            normals.sort(key=lambda i: result[i].get("score", 0.5))
+            for i in normals[: len(normals) - max_normal]:
+                result[i] = {**result[i], "label": "fade"}
 
-        # Demote excess highlights (prefer keeping highest-scoring ones)
-        highlights = [i for i, a in enumerate(result) if a["label"] == "highlight"]
-        if len(highlights) > max_h:
-            # sort by score ascending so lowest-scoring highlights get demoted
-            highlights.sort(key=lambda i: result[i].get("score", 0.5))
-            for i in highlights[: len(highlights) - max_h]:
-                result[i] = {**result[i], "label": "normal"}
-
-        # Demote excess fades (prefer keeping lowest-scoring ones)
-        fades = [i for i, a in enumerate(result) if a["label"] == "fade"]
-        if len(fades) > max_f:
-            # sort by score descending so highest-scoring fades get demoted
-            fades.sort(key=lambda i: result[i].get("score", 0.5), reverse=True)
-            for i in fades[: len(fades) - max_f]:
-                result[i] = {**result[i], "label": "normal"}
-
-        # Strip internal score field before returning (not part of public schema)
-        return [{"text": a["text"], "label": a["label"]} for a in result]
+        return [{"text": a["text"], "label": a["label"], "key_phrases": a.get("key_phrases", [])} for a in result]

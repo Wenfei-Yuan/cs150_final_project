@@ -74,7 +74,8 @@ export type AdhdChunksResponse = {
 
 export type SentenceAnnotation = {
   text: string
-  label: 'highlight' | 'fade' | 'normal'
+  label: 'fade' | 'normal'
+  key_phrases?: string[]
 }
 
 export type AnnotateResponse = {

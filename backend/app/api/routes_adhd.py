@@ -131,6 +131,6 @@ async def annotate_visible(
 
     return AnnotateResponse(
         annotations=[
-            SentenceAnnotation(text=a["text"], label=a["label"]) for a in items
+            SentenceAnnotation(text=a["text"], label=a["label"], key_phrases=a.get("key_phrases", [])) for a in items
         ]
     )
