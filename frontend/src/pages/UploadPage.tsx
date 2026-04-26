@@ -3,21 +3,6 @@ import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 
-type Persona = 'professor' | 'peer'
-
-const PERSONA_INFO: Record<Persona, { label: string; tagline: string; description: string }> = {
-  professor: {
-    label: 'Professor',
-    tagline: 'Formal & precise',
-    description: 'Structured explanations with academic depth. Great for building rigorous understanding.',
-  },
-  peer: {
-    label: 'ADHD Peer',
-    tagline: 'Casual & relatable',
-    description: 'Friendly, energetic breakdowns from someone who gets it. Great for staying engaged.',
-  },
-}
-
 const STORAGE_KEY = 'upload_form'
 
 function loadSaved() {
@@ -41,7 +26,6 @@ export default function UploadPage() {
   const [uploadedDocId, setUploadedDocId] = useState<string | null>(saved?.uploadedDocId ?? null)
   const [uploadedFilename, setUploadedFilename] = useState<string | null>(saved?.uploadedFilename ?? null)
   const [username, setUsername] = useState<string>(saved?.username ?? '')
-  const [selectedPersona, setSelectedPersona] = useState<Persona | null>(saved?.selectedPersona ?? null)
   const inputRef = useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
 
@@ -58,7 +42,7 @@ export default function UploadPage() {
       toast.success(`Ready — ${doc.chunk_count} sections`, { id: toastId })
       setUploadedDocId(doc.document_id)
       setUploadedFilename(doc.filename)
-      save({ uploadedDocId: doc.document_id, uploadedFilename: doc.filename, username, selectedPersona })
+      save({ uploadedDocId: doc.document_id, uploadedFilename: doc.filename, username })
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Upload failed.'
       toast.error(msg, { id: toastId })
@@ -69,21 +53,17 @@ export default function UploadPage() {
   }
 
   async function handleStart() {
-    if (!uploadedDocId || !username.trim() || !selectedPersona) return
+    if (!uploadedDocId || !username.trim()) return
     setStarting(true)
     const toastId = toast.loading('Setting up your session…')
     try {
       const session = await api.createSession(uploadedDocId, username.trim())
-      const personaRes = await api.selectPersona(session.session_id, selectedPersona)
       toast.success('Ready!', { id: toastId })
-      navigate(`/intro/${session.session_id}`, {
+      navigate(`/read/${session.session_id}`, {
         state: {
           document_id: uploadedDocId,
           filename: uploadedFilename,
           user_name: username.trim(),
-          persona: selectedPersona,
-          persona_name: personaRes.name,
-          intro: personaRes.intro,
         },
       })
     } catch (e) {
@@ -102,13 +82,13 @@ export default function UploadPage() {
     if (file) handleFile(file)
   }
 
-  const canStart = !!uploadedDocId && username.trim().length > 0 && !!selectedPersona
+  const canStart = !!uploadedDocId && username.trim().length > 0
 
   return (
     <div className="min-h-screen grid grid-cols-2">
 
       {/* Left half — slate bg, vertically centered */}
-      <div className="bg-gray-700 flex items-center justify-center py-16 px-12">
+      <div className="bg-slate-700 flex items-center justify-center py-16 px-12">
         <div className="w-full max-w-lg space-y-10">
           <h1 style={{ fontFamily: "'Atkinson Hyperlegible', sans-serif" }} className="text-3xl font-bold tracking-tight text-white text-center leading-snug">
             ADHD Reading Companion
@@ -117,19 +97,19 @@ export default function UploadPage() {
           <div className="rounded-xl bg-white/20 px-7 py-6 space-y-5">
             {[
               { n: '1', text: 'Upload a PDF or Markdown paper' },
-              { n: '2', text: 'Pick a reading guide – a professor or an ADHD peer' },
-              { n: '3', text: 'Read with AI-powered highlights and explanations' },
-              { n: '4', text: 'Take a short quiz to check your understanding' },
+              { n: '2', text: 'Read with AI-powered highlights and explanations' },
+              { n: '3', text: 'Reveal text at your own pace — one paragraph at a time' },
+              { n: '4', text: 'Ask for an explanation anytime you need one' },
             ].map(({ n, text }) => (
               <div key={n} className="flex items-start gap-2.5">
-                <span className="text-xs font-semibold text-gray-700 bg-white rounded-full w-5 h-5 flex items-center justify-center shrink-0 mt-0.5">{n}</span>
+                <span className="text-xs font-semibold text-slate-700 bg-white rounded-full w-5 h-5 flex items-center justify-center shrink-0 mt-0.5">{n}</span>
                 <p className="text-sm text-white/90 leading-relaxed">{text}</p>
               </div>
             ))}
           </div>
 
           <p className="text-xs text-white/70 italic leading-relaxed border-t border-white/30 pt-4">
-            This app is experimental. AI-generated explanations and quiz questions may be inaccurate — always verify with your course materials.
+            This app is experimental. AI-generated explanations may be inaccurate — always verify with your course materials.
           </p>
         </div>
       </div>
@@ -146,7 +126,7 @@ export default function UploadPage() {
             <input
               type="text"
               value={username}
-              onChange={(e) => { setUsername(e.target.value); save({ uploadedDocId, uploadedFilename, username: e.target.value, selectedPersona }) }}
+              onChange={(e) => { setUsername(e.target.value); save({ uploadedDocId, uploadedFilename, username: e.target.value }) }}
               onKeyDown={(e) => e.key === 'Enter' && canStart && handleStart()}
               placeholder="Enter your name"
               className="w-full px-3 py-2.5 rounded-lg border border-border bg-background text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground transition-colors"
@@ -191,7 +171,7 @@ export default function UploadPage() {
                   <div className="text-left">
                     <p className="text-sm font-medium text-foreground truncate max-w-xs">{uploadedFilename}</p>
                     <button
-                      onClick={(e) => { e.stopPropagation(); setUploadedDocId(null); setUploadedFilename(null); save({ uploadedDocId: null, uploadedFilename: null, username, selectedPersona }); inputRef.current?.click() }}
+                      onClick={(e) => { e.stopPropagation(); setUploadedDocId(null); setUploadedFilename(null); save({ uploadedDocId: null, uploadedFilename: null, username }); inputRef.current?.click() }}
                       className="text-xs text-muted-foreground hover:text-foreground transition-colors mt-0.5"
                     >
                       Replace file
@@ -204,36 +184,6 @@ export default function UploadPage() {
                   <p className="text-xs text-muted-foreground mt-1">PDF or Markdown · or click to browse</p>
                 </>
               )}
-            </div>
-          </div>
-
-          {/* Persona selection */}
-          <div className="space-y-3">
-            <label className="text-xs uppercase tracking-widest text-muted-foreground">
-              Pick your guide
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              {(Object.keys(PERSONA_INFO) as Persona[]).map((persona) => {
-                const info = PERSONA_INFO[persona]
-                const isSelected = selectedPersona === persona
-                return (
-                  <button
-                    key={persona}
-                    onClick={() => { setSelectedPersona(persona); save({ uploadedDocId, uploadedFilename, username, selectedPersona: persona }) }}
-                    className={`
-                      text-left p-4 rounded-lg border transition-colors
-                      ${isSelected
-                        ? 'border-foreground bg-muted'
-                        : 'border-border hover:border-muted-foreground'
-                      }
-                    `}
-                  >
-                    <p className="text-sm font-medium text-foreground">{info.label}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">{info.tagline}</p>
-                    <p className="text-xs text-muted-foreground mt-2 leading-relaxed">{info.description}</p>
-                  </button>
-                )
-              })}
             </div>
           </div>
 

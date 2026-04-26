@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, isValidElement } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -11,11 +11,23 @@ function slugify(text: string) {
   return text.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-')
 }
 
+function extractText(node: React.ReactNode): string {
+  if (typeof node === 'string') return node
+  if (typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(extractText).join('')
+  if (isValidElement(node)) return extractText((node.props as { children?: React.ReactNode }).children)
+  return ''
+}
+
+function splitSentences(text: string): string[] {
+  return text.split(/(?<=[.!?])\s+(?=[A-Z"])/).filter((s) => s.trim())
+}
+
 export default function ReadPage() {
   const { sessionId } = useParams<{ sessionId: string }>()
   const navigate = useNavigate()
   const location = useLocation()
-  const state = location.state as { document_id?: string; filename?: string; persona?: string; persona_name?: string; user_name?: string } | null
+  const state = location.state as { document_id?: string; filename?: string; user_name?: string } | null
 
   const [documentId, setDocumentId] = useState<string | null>(state?.document_id ?? null)
   const [fullText, setFullText] = useState<string | null>(null)
@@ -34,6 +46,12 @@ export default function ReadPage() {
   const [explainPhase, setExplainPhase] = useState(0)
   const [explainFading, setExplainFading] = useState(false)
   const [explainedText, setExplainedText] = useState<string | null>(null)
+  const [annotationMap, setAnnotationMap] = useState<Map<string, 'highlight' | 'fade' | 'normal'> | null>(null)
+  const [visibleCount, setVisibleCount] = useState(1)
+  const [revealing, setRevealing] = useState(false)
+  const [allRevealUnits, setAllRevealUnits] = useState<string[]>([])
+  const [loadingChunks, setLoadingChunks] = useState(true)
+  const preloadCache = useRef(new Map<number, Map<string, 'highlight' | 'fade' | 'normal'>>())
   const articleRef = useRef<HTMLDivElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
 
@@ -56,6 +74,70 @@ export default function ReadPage() {
       .catch(() => setError('Could not load document text.'))
       .finally(() => setLoadingText(false))
   }, [documentId])
+
+  function buildAnnotationMap(res: Awaited<ReturnType<typeof api.annotateText>>) {
+    const map = new Map<string, 'highlight' | 'fade' | 'normal'>()
+    res.annotations.forEach(({ text, label }) => map.set(text.trim().replace(/\s+/g, ' '), label))
+    return map
+  }
+
+  function prefetch(docId: string, units: string[], count: number) {
+    if (count > units.length || preloadCache.current.has(count)) return
+    api.annotateText(docId, units.slice(0, count))
+      .then((r) => preloadCache.current.set(count, buildAnnotationMap(r)))
+      .catch(() => {})
+  }
+
+  // Fetch chunks, annotate first unit, then reveal — so highlights are always ready on load
+  useEffect(() => {
+    if (!documentId) return
+    setLoadingChunks(true)
+    preloadCache.current.clear()
+    api.getAdhdChunks(documentId)
+      .then(async (res) => {
+        const units = res.chunks.map((c) => c.paragraphs.join('\n\n'))
+        setAllRevealUnits(units)
+        if (units.length > 0) {
+          try {
+            const annotRes = await api.annotateText(documentId, units.slice(0, 1))
+            const map = buildAnnotationMap(annotRes)
+            preloadCache.current.set(1, map)
+            setAnnotationMap(map)
+          } catch { /* reveal without annotations */ }
+          prefetch(documentId, units, 2)
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoadingChunks(false))
+  }, [documentId])
+
+  async function handleReadMore() {
+    if (!documentId || revealing) return
+    const nextCount = Math.min(allRevealUnits.length, visibleCount + 1)
+    if (nextCount === visibleCount) return
+
+    if (preloadCache.current.has(nextCount)) {
+      setAnnotationMap(preloadCache.current.get(nextCount)!)
+      setVisibleCount(nextCount)
+    } else {
+      setRevealing(true)
+      try {
+        const res = await api.annotateText(documentId, allRevealUnits.slice(0, nextCount))
+        const map = buildAnnotationMap(res)
+        preloadCache.current.set(nextCount, map)
+        setAnnotationMap(map)
+      } catch { /* reveal anyway */ }
+      setVisibleCount(nextCount)
+      setRevealing(false)
+    }
+    prefetch(documentId, allRevealUnits, nextCount + 1)
+  }
+
+  function handleReadLess() {
+    const prevCount = Math.max(1, visibleCount - 1)
+    if (preloadCache.current.has(prevCount)) setAnnotationMap(preloadCache.current.get(prevCount)!)
+    setVisibleCount(prevCount)
+  }
 
   // Extract H2 headings from markdown
   const headings = useMemo<Heading[]>(() => {
@@ -210,11 +292,6 @@ export default function ReadPage() {
     toast.success('Saved to highlights')
   }
 
-  function handleTakeQuiz() {
-    navigate(`/quiz/${sessionId}`, {
-      state: { document_id: documentId, persona: state?.persona, user_name: state?.user_name },
-    })
-  }
 
   if (error) {
     return (
@@ -224,13 +301,39 @@ export default function ReadPage() {
     )
   }
 
-  // Custom h2 renderer — injects id for scroll targeting
+  function annotatedParagraph(text: string) {
+    const sentences = splitSentences(text)
+    if (!annotationMap || sentences.length === 0) return <>{text}</>
+    return (
+      <>
+        {sentences.map((s, i) => {
+          const label = annotationMap.get(s.trim().replace(/\s+/g, ' '))
+          return (
+            <span
+              key={i}
+              style={{
+                ...(label === 'highlight' ? { fontWeight: 700, color: '#111827', backgroundColor: '#FEF3C7', borderRadius: '2px', padding: '0 1px' } : {}),
+                ...(label === 'fade' ? { color: '#9CA3AF', fontWeight: 400 } : {}),
+              }}
+            >
+              {s}{i < sentences.length - 1 ? ' ' : ''}
+            </span>
+          )
+        })}
+      </>
+    )
+  }
+
+  // Custom markdown renderers — h2 gets scroll id, p gets sentence annotations
   const mdComponents = {
     h2: ({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) => {
       const text = typeof children === 'string' ? children : String(children)
       const id = slugify(text)
       return <h2 id={id} {...props}>{children}</h2>
     },
+    p: ({ children, ...props }: React.HTMLAttributes<HTMLParagraphElement>) => (
+      <p {...props}>{annotatedParagraph(extractText(children))}</p>
+    ),
   }
 
   return (
@@ -242,9 +345,7 @@ export default function ReadPage() {
               ← Back
             </button>
             <p className="text-sm text-muted-foreground truncate max-w-xs">{state?.filename ?? 'Reading'}</p>
-          <button onClick={handleTakeQuiz} className="px-6 py-3 rounded-lg bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity">
-            Take quiz
-          </button>
+          <div />
         </div>
       </header>
 
@@ -287,7 +388,7 @@ export default function ReadPage() {
 
         {/* Center: article — always 600px */}
         <div>
-          {loadingText ? (
+          {(loadingText || loadingChunks) ? (
             <div className="space-y-6 pt-2">
               <div className="flex items-center gap-3 pb-2">
                 <div className="w-5 h-5 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin shrink-0" />
@@ -309,26 +410,43 @@ export default function ReadPage() {
           ) : (
             <div ref={articleRef} onMouseUp={handleMouseUp} className="prose reading-prose select-text">
               {isMarkdown
-                ? <ReactMarkdown components={mdComponents}>{fullText ?? ''}</ReactMarkdown>
-                : <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{fullText}</span>
+                ? <ReactMarkdown components={mdComponents}>{allRevealUnits.slice(0, visibleCount).join('\n\n')}</ReactMarkdown>
+                : allRevealUnits.slice(0, visibleCount)
+                    .flatMap((unit, ui) =>
+                      unit.split(/\n\n+/).filter((p) => p.trim()).map((para, pi) => (
+                        <p key={`${ui}-${pi}`} className="mb-6">{annotatedParagraph(para.trim())}</p>
+                      ))
+                    )
               }
             </div>
           )}
 
-          {!loadingText && fullText && (
-            <div className="mt-16 pt-8 border-t border-border text-center">
-              <p className="text-sm text-muted-foreground mb-4">
-                {state?.persona === 'professor'
-                  ? `Finished the material? Let's assess your comprehension with Prof. ${state.persona_name ?? 'Chen'}.`
-                  : state?.persona === 'peer'
-                  ? `${state.persona_name ?? 'Alex'}: nice work getting through it! Wanna see how much stuck?`
-                  : "Done reading? Test your understanding."}
-              </p>
-              <button onClick={handleTakeQuiz} className="px-6 py-2.5 rounded-lg bg-foreground text-background text-sm font-medium hover:opacity-90 transition-opacity">
-                Take the quiz
-              </button>
+          {!loadingText && !loadingChunks && allRevealUnits.length > 0 && (
+            <div className="mt-10 pt-6 border-t border-border flex flex-col items-center gap-4">
+              <span className="text-xs text-muted-foreground">{visibleCount} / {allRevealUnits.length} sections</span>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleReadLess}
+                  disabled={visibleCount <= 1}
+                  className="px-4 py-2 rounded-lg text-sm border border-border hover:bg-muted/40 transition-colors disabled:opacity-30"
+                >
+                  Read Less
+                </button>
+                <button
+                  onClick={handleReadMore}
+                  disabled={visibleCount >= allRevealUnits.length || revealing}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm bg-foreground text-background hover:opacity-90 transition-opacity disabled:opacity-30"
+                >
+                  {revealing && <div className="w-3 h-3 rounded-full border-2 border-background/30 border-t-background animate-spin" />}
+                  Read More
+                </button>
+              </div>
+              {visibleCount >= allRevealUnits.length && (
+                <p className="text-xs text-muted-foreground italic">End of document.</p>
+              )}
             </div>
           )}
+
         </div>
 
         {/* Right: hint + explain panel */}

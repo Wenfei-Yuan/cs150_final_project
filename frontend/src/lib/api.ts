@@ -57,6 +57,30 @@ export type PersonaIntroResponse = {
   intro: string
 }
 
+// ── ADHD Annotation ────────────────────────────────────────────────────────────
+
+export type ParagraphChunk = {
+  chunk_index: number
+  chunk_id: string
+  section: string | null
+  paragraphs: string[]
+}
+
+export type AdhdChunksResponse = {
+  document_id: string
+  chunks: ParagraphChunk[]
+  total_chunks: number
+}
+
+export type SentenceAnnotation = {
+  text: string
+  label: 'highlight' | 'fade' | 'normal'
+}
+
+export type AnnotateResponse = {
+  annotations: SentenceAnnotation[]
+}
+
 // ── Explain ────────────────────────────────────────────────────────────────────
 
 export type ExplainResponse = {
@@ -133,7 +157,17 @@ export const api = {
   selectPersona: (sessionId: string, persona: string) =>
     request<PersonaSelectResponse>('POST', '/persona/select', { session_id: sessionId, persona }),
 
-  // Stage 4: Explain highlighted text
+  // Stage 4a: ADHD annotation
+  getAdhdChunks: (documentId: string) =>
+    request<AdhdChunksResponse>('GET', `/adhd/chunks/${documentId}`),
+
+  annotateText: (documentId: string, visibleBlocks: string[]) =>
+    request<AnnotateResponse>('POST', '/adhd/annotate', {
+      document_id: documentId,
+      visible_blocks: visibleBlocks,
+    }),
+
+  // Stage 4b: Explain highlighted text
   explainSelection: (documentId: string, selectedText: string, surroundingText = '') =>
     request<ExplainResponse>('POST', '/explain/selection', {
       document_id: documentId,
@@ -157,6 +191,9 @@ export const api = {
       correct_answer: correctAnswer,
       difficulty,
     }),
+
+  getQuizState: (sessionId: string) =>
+    request<{ session_id: string; answers: Record<string, string> }>('GET', `/learning-test/state?session_id=${sessionId}`),
 
   submitTest: (payload: {
     sessionId: string

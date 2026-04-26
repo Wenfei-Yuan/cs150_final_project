@@ -45,10 +45,10 @@ def split_sentences(text: str) -> list[str]:
 
 
 # ── Score / label thresholds ──────────────────────────────────────────────────
-_HIGHLIGHT_THRESH = 0.65   # score >= this → highlight
-_FADE_THRESH      = 0.30   # score <  this → fade
+_HIGHLIGHT_THRESH = 0.65   # score >= this → highlight (bold)
+_FADE_THRESH      = 0.50   # score <  this → fade (most supporting text)
 _MAX_HIGHLIGHT    = 0.30   # guardrail: at most 30 % of sentences
-_MAX_FADE         = 0.25   # guardrail: at most 25 % of sentences
+_MAX_FADE         = 0.60   # guardrail: at most 60 % of sentences
 _EMA_ALPHA        = 0.4    # exponential smoothing weight for new score
 
 _VALID_LABELS = {"highlight", "fade", "normal"}

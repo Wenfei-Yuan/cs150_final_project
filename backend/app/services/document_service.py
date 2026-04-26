@@ -82,14 +82,54 @@ class DocumentService:
         raw_text = Path(file_path).read_text(encoding="utf-8")
         if not raw_text.strip():
             raise ValueError("Markdown file is empty.")
-        # Split on blank lines for paragraphs
-        paragraphs = [p.strip() for p in raw_text.split("\n\n") if p.strip()]
+        raw_paras = [p.strip() for p in raw_text.split("\n\n") if p.strip()]
+        paragraphs = DocumentService._normalize_md_paragraphs(raw_paras)
         return {
             "raw_text": raw_text,
             "page_count": 1,
             "paragraphs": paragraphs,
             "sections": [],
         }
+
+    @staticmethod
+    def _normalize_md_paragraphs(paragraphs: list[str]) -> list[str]:
+        """
+        1. Merge preamble blocks (before the first # heading) into one block
+           so that title/authors/affiliations don't each become their own chunk.
+        2. Merge standalone # heading lines with the following content paragraph
+           so that a heading never surfaces as a lone reveal unit.
+        """
+        if not paragraphs:
+            return paragraphs
+
+        # Step 1: collapse preamble
+        first_heading = next(
+            (i for i, p in enumerate(paragraphs) if p.startswith("#")),
+            None,
+        )
+        if first_heading and first_heading > 0:
+            preamble = "\n\n".join(paragraphs[:first_heading])
+            paragraphs = [preamble] + paragraphs[first_heading:]
+
+        # Step 2: merge standalone heading lines with the following paragraph
+        result: list[str] = []
+        i = 0
+        while i < len(paragraphs):
+            para = paragraphs[i]
+            is_lone_heading = (
+                para.startswith("#")
+                and "\n" not in para.strip()  # single line only
+            )
+            if is_lone_heading and i + 1 < len(paragraphs):
+                next_para = paragraphs[i + 1]
+                if not next_para.startswith("#"):
+                    result.append(para + "\n\n" + next_para)
+                    i += 2
+                    continue
+            result.append(para)
+            i += 1
+
+        return result
 
     async def get_document(self, document_id: str) -> Document:
         result = await self.db.execute(
