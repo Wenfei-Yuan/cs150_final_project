@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, isValidElement } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { toast } from 'sonner'
-import { api } from '@/lib/api'
+import { api, type FollowUpTurn } from '@/lib/api'
 
 type Heading = { id: string; text: string }
 type Highlight = { id: string; text: string; explanation?: string }
@@ -46,6 +46,11 @@ export default function ReadPage() {
   const [explainPhase, setExplainPhase] = useState(0)
   const [explainFading, setExplainFading] = useState(false)
   const [explainedText, setExplainedText] = useState<string | null>(null)
+
+  // Follow-up chat state
+  const [followUpHistory, setFollowUpHistory] = useState<FollowUpTurn[]>([])
+  const [followUpInput, setFollowUpInput] = useState('')
+  const [followUpLoading, setFollowUpLoading] = useState(false)
   const [annotationMap, setAnnotationMap] = useState<Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null>(null)
   const [visibleCount, setVisibleCount] = useState(1)
   const [revealing, setRevealing] = useState(false)
@@ -216,6 +221,8 @@ export default function ReadPage() {
         setSelection(null)
         setExplanation(null)
         setExplainPanelOpen(false)
+        setFollowUpHistory([])
+        setFollowUpInput('')
       }
     }
     document.addEventListener('mousedown', handleClick)
@@ -269,6 +276,8 @@ export default function ReadPage() {
     setExplanation(null)
     setExplainPanelOpen(true)
     setExplainedText(selection.text)
+    setFollowUpHistory([])
+    setFollowUpInput('')
     const surroundingText = fullText ? (() => {
       const idx = fullText.indexOf(selection.text)
       if (idx === -1) return ''
@@ -292,6 +301,21 @@ export default function ReadPage() {
     const id = `hl-${Date.now()}`
     setHighlights((prev) => [...prev, { id, text: explainedText, explanation: explanation ?? undefined }])
     toast.success('Saved to highlights')
+  }
+
+  async function handleFollowUp() {
+    if (!followUpInput.trim() || !explainedText || !explanation || followUpLoading) return
+    const question = followUpInput.trim()
+    setFollowUpInput('')
+    setFollowUpLoading(true)
+    try {
+      const res = await api.explainFollowUp(explainedText, explanation, question, followUpHistory)
+      setFollowUpHistory((prev) => [...prev, { question, answer: res.answer }])
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not get follow-up answer.')
+    } finally {
+      setFollowUpLoading(false)
+    }
   }
 
 
@@ -498,7 +522,15 @@ export default function ReadPage() {
             <div className="sticky top-20 rounded-lg border border-border bg-white/60 p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-xs uppercase tracking-widest text-muted-foreground">Explanation</p>
-                <button onClick={() => { setExplainPanelOpen(false); setExplanation(null) }} className="text-muted-foreground hover:text-foreground text-xs">✕</button>
+                <button
+                  onClick={() => {
+                    setExplainPanelOpen(false)
+                    setExplanation(null)
+                    setFollowUpHistory([])
+                    setFollowUpInput('')
+                  }}
+                  className="text-muted-foreground hover:text-foreground text-xs"
+                >✕</button>
               </div>
               {explaining ? (
                 <div className="space-y-3">
@@ -531,6 +563,43 @@ export default function ReadPage() {
                   >
                     + Save to highlights
                   </button>
+
+                  {/* Follow-up Q&A section */}
+                  {followUpHistory.length > 0 && (
+                    <div className="space-y-3 pt-2 border-t border-border">
+                      {followUpHistory.map((turn, i) => (
+                        <div key={i} className="space-y-1">
+                          <p className="text-xs font-medium text-foreground leading-snug">Q: {turn.question}</p>
+                          <p className="text-xs text-muted-foreground leading-relaxed pl-2 border-l-2 border-border">{turn.answer}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="pt-2 border-t border-border space-y-2">
+                    <p className="text-xs text-muted-foreground">Ask a follow-up question</p>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={followUpInput}
+                        onChange={(e) => setFollowUpInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleFollowUp() }}
+                        placeholder="e.g. Can you give an example?"
+                        disabled={followUpLoading}
+                        className="flex-1 text-xs rounded-md border border-border bg-white px-2.5 py-1.5 placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-foreground/20 disabled:opacity-50"
+                      />
+                      <button
+                        onClick={handleFollowUp}
+                        disabled={!followUpInput.trim() || followUpLoading}
+                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs bg-foreground text-background hover:opacity-90 transition-opacity disabled:opacity-30"
+                      >
+                        {followUpLoading
+                          ? <div className="w-3 h-3 rounded-full border-2 border-background/30 border-t-background animate-spin" />
+                          : 'Ask'
+                        }
+                      </button>
+                    </div>
+                  </div>
                 </div>
               ) : null}
             </div>

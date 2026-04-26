@@ -123,3 +123,59 @@ class ExplainService:
         )
         return explanation.strip()
 
+    async def follow_up(
+        self,
+        selected_text: str,
+        explanation: str,
+        question: str,
+        history: list[dict],
+    ) -> str:
+        """
+        Answer a follow-up question about the previously explained selection.
+
+        Parameters
+        ----------
+        selected_text : str   — the original highlighted passage
+        explanation   : str   — the AI explanation already shown to the user
+        question      : str   — the user's follow-up question
+        history       : list  — previous Q&A pairs, each {"question": ..., "answer": ...}
+        """
+        system_prompt = (
+            "You are a neutral reading assistant. "
+            "The user has highlighted a passage and received an explanation. "
+            "They are now asking a follow-up question about that passage or the explanation. "
+            "Rules:\n"
+            "- Answer ONLY questions that are related to the highlighted passage or its explanation.\n"
+            "- Do NOT adopt any persona.\n"
+            "- Do NOT reveal quiz answers or generate test questions.\n"
+            "- Keep answers concise: 2–4 sentences maximum.\n"
+            "- Write in plain prose."
+        )
+
+        # Build the full conversation as a single user prompt
+        parts: list[str] = []
+        parts.append(
+            f"The reader highlighted this passage:\n\"\"\"\n{selected_text}\n\"\"\"\n\n"
+            f"The explanation provided was:\n\"\"\"\n{explanation}\n\"\"\""
+        )
+
+        if history:
+            parts.append("\nPrevious follow-up exchange:")
+            for turn in history:
+                parts.append(f"Q: {turn['question']}\nA: {turn['answer']}")
+
+        parts.append(f"\nNow answer this new follow-up question:\n{question}")
+
+        user_prompt = "\n\n".join(parts)
+
+        answer = await chat_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_format="text",
+        )
+        logger.info(
+            "Generated follow-up answer (selection_len=%d, history_turns=%d)",
+            len(selected_text), len(history),
+        )
+        return answer.strip()
+

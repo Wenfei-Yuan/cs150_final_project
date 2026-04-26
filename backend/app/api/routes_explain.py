@@ -1,6 +1,7 @@
 """
 Routes: /explain
   POST /explain/selection   — neutral chatbot: explain a highlighted passage
+  POST /explain/follow-up   — answer a follow-up question about the explanation
 """
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -24,6 +25,22 @@ class ExplainRequest(BaseModel):
 class ExplainResponse(BaseModel):
     selected_text: str
     explanation: str
+
+
+class FollowUpTurn(BaseModel):
+    question: str
+    answer: str
+
+
+class FollowUpRequest(BaseModel):
+    selected_text: str = Field(..., min_length=1, max_length=2000)
+    explanation: str = Field(..., min_length=1, max_length=4000)
+    question: str = Field(..., min_length=1, max_length=1000)
+    history: list[FollowUpTurn] = Field(default_factory=list)
+
+
+class FollowUpResponse(BaseModel):
+    answer: str
 
 
 @router.post(
@@ -54,3 +71,27 @@ async def explain_selection(
         selected_text=payload.selected_text,
         explanation=explanation,
     )
+
+
+@router.post(
+    "/follow-up",
+    response_model=FollowUpResponse,
+    summary="Answer a follow-up question about an explanation",
+)
+async def explain_follow_up(
+    payload: FollowUpRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Accepts a follow-up question from the user along with the original selected
+    text, the explanation already given, and any prior Q&A history.
+    Returns a concise, neutral answer.
+    """
+    svc = ExplainService(db)
+    answer = await svc.follow_up(
+        selected_text=payload.selected_text,
+        explanation=payload.explanation,
+        question=payload.question,
+        history=[t.model_dump() for t in payload.history],
+    )
+    return FollowUpResponse(answer=answer)

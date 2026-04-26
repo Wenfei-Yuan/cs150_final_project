@@ -89,6 +89,15 @@ export type ExplainResponse = {
   explanation: string
 }
 
+export type FollowUpTurn = {
+  question: string
+  answer: string
+}
+
+export type FollowUpResponse = {
+  answer: string
+}
+
 // ── Learning Test ──────────────────────────────────────────────────────────────
 
 export type TestQuestion = {
@@ -174,6 +183,14 @@ export const api = {
       document_id: documentId,
       selected_text: selectedText,
       surrounding_text: surroundingText,
+    }),
+
+  explainFollowUp: (selectedText: string, explanation: string, question: string, history: FollowUpTurn[] = []) =>
+    request<FollowUpResponse>('POST', '/explain/follow-up', {
+      selected_text: selectedText,
+      explanation,
+      question,
+      history,
     }),
 
   // Stage 5: Learning test
