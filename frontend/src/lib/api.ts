@@ -84,6 +84,8 @@ export type AnnotateResponse = {
 
 // ── Explain ────────────────────────────────────────────────────────────────────
 
+export type ConversationMessage = { role: 'user' | 'assistant'; content: string }
+
 export type ExplainResponse = {
   selected_text: string
   explanation: string
@@ -169,11 +171,19 @@ export const api = {
     }),
 
   // Stage 4b: Explain highlighted text
-  explainSelection: (documentId: string, selectedText: string, surroundingText = '') =>
+  explainSelection: (
+    documentId: string,
+    selectedText: string,
+    surroundingText = '',
+    conversationHistory: import('@/lib/api').ConversationMessage[] = [],
+    followUpQuestion?: string,
+  ) =>
     request<ExplainResponse>('POST', '/explain/selection', {
       document_id: documentId,
       selected_text: selectedText,
       surrounding_text: surroundingText,
+      conversation_history: conversationHistory,
+      follow_up_question: followUpQuestion ?? null,
     }),
 
   // Stage 5: Learning test

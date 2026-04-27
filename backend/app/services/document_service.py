@@ -3,6 +3,7 @@ Document service — handles upload, text extraction, chunking, and DB persisten
 """
 from __future__ import annotations
 import os
+import re
 import uuid
 import shutil
 from pathlib import Path
@@ -100,6 +101,11 @@ class DocumentService:
         2. Merge standalone # heading lines with the following content paragraph
            so that a heading never surfaces as a lone reveal unit.
         """
+        if not paragraphs:
+            return paragraphs
+
+        # Remove standalone horizontal rules (---, ***, ___)
+        paragraphs = [p for p in paragraphs if not re.match(r'^[-*_]{3,}\s*$', p.strip())]
         if not paragraphs:
             return paragraphs
 

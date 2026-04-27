@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, isValidElement } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { toast } from 'sonner'
-import { api } from '@/lib/api'
+import { api, type ConversationMessage } from '@/lib/api'
 
 type Heading = { id: string; text: string }
 type Highlight = { id: string; text: string; explanation?: string }
@@ -23,6 +23,40 @@ function splitSentences(text: string): string[] {
   return text.split(/(?<=[.!?])\s+(?=[A-Z"])/).filter((s) => s.trim())
 }
 
+function renderWithKeyPhrases(text: string, keyPhrases: string[]) {
+  if (keyPhrases.length === 0) return <>{text}</>
+  const ranges: Array<{ start: number; end: number }> = []
+  for (const phrase of keyPhrases) {
+    const idx = text.toLowerCase().indexOf(phrase.toLowerCase())
+    if (idx !== -1) ranges.push({ start: idx, end: idx + phrase.length })
+  }
+  if (ranges.length === 0) return <>{text}</>
+  ranges.sort((a, b) => a.start - b.start)
+  const merged: typeof ranges = []
+  for (const r of ranges) {
+    if (merged.length && r.start <= merged[merged.length - 1].end)
+      merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, r.end)
+    else merged.push({ ...r })
+  }
+  const segments: Array<{ text: string; isKey: boolean }> = []
+  let cursor = 0
+  for (const { start, end } of merged) {
+    if (start > cursor) segments.push({ text: text.slice(cursor, start), isKey: false })
+    segments.push({ text: text.slice(start, end), isKey: true })
+    cursor = end
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor), isKey: false })
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.isKey
+          ? <span key={i} style={{ fontWeight: 700, color: '#0F172A' }}>{seg.text}</span>
+          : <span key={i}>{seg.text}</span>
+      )}
+    </>
+  )
+}
+
 export default function ReadPage() {
   const { sessionId } = useParams<{ sessionId: string }>()
   const navigate = useNavigate()
@@ -40,8 +74,10 @@ export default function ReadPage() {
 
   // Explain state
   const [selection, setSelection] = useState<{ text: string; x: number; y: number } | null>(null)
-  const [explanation, setExplanation] = useState<string | null>(null)
+  const [conversationHistory, setConversationHistory] = useState<ConversationMessage[]>([])
   const [explaining, setExplaining] = useState(false)
+  const [followingUp, setFollowingUp] = useState(false)
+  const [followUpInput, setFollowUpInput] = useState('')
   const [explainPanelOpen, setExplainPanelOpen] = useState(false)
   const [explainPhase, setExplainPhase] = useState(0)
   const [explainFading, setExplainFading] = useState(false)
@@ -83,10 +119,24 @@ export default function ReadPage() {
     return map
   }
 
-  function prefetch(docId: string, units: string[], count: number) {
+  function mergeAnnotationMap(
+    existing: Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null,
+    res: Awaited<ReturnType<typeof api.annotateText>>
+  ) {
+    const map = new Map(existing ?? [])
+    res.annotations.forEach(({ text, label, key_phrases }) => {
+      const key = text.trim().replace(/\s+/g, ' ')
+      if (!map.has(key))
+        map.set(key, { label: label as 'fade' | 'normal', keyPhrases: key_phrases ?? [] })
+    })
+    return map
+  }
+
+  function prefetch(docId: string, units: string[], count: number, baseMap: Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null) {
     if (count > units.length || preloadCache.current.has(count)) return
+    const prevMap = preloadCache.current.get(count - 1) ?? baseMap
     api.annotateText(docId, units.slice(0, count))
-      .then((r) => preloadCache.current.set(count, buildAnnotationMap(r)))
+      .then((r) => preloadCache.current.set(count, mergeAnnotationMap(prevMap, r)))
       .catch(() => {})
   }
 
@@ -105,8 +155,10 @@ export default function ReadPage() {
             const map = buildAnnotationMap(annotRes)
             preloadCache.current.set(1, map)
             setAnnotationMap(map)
-          } catch { /* reveal without annotations */ }
-          prefetch(documentId, units, 2)
+            prefetch(documentId, units, 2, map)
+          } catch {
+            prefetch(documentId, units, 2, null)
+          }
         }
       })
       .catch(() => {})
@@ -118,21 +170,24 @@ export default function ReadPage() {
     const nextCount = Math.min(allRevealUnits.length, visibleCount + 1)
     if (nextCount === visibleCount) return
 
+    let nextBase: Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null = null
     if (preloadCache.current.has(nextCount)) {
-      setAnnotationMap(preloadCache.current.get(nextCount)!)
+      nextBase = preloadCache.current.get(nextCount)!
+      setAnnotationMap(nextBase)
       setVisibleCount(nextCount)
     } else {
       setRevealing(true)
       try {
         const res = await api.annotateText(documentId, allRevealUnits.slice(0, nextCount))
-        const map = buildAnnotationMap(res)
-        preloadCache.current.set(nextCount, map)
-        setAnnotationMap(map)
+        const merged = mergeAnnotationMap(annotationMap, res)
+        preloadCache.current.set(nextCount, merged)
+        setAnnotationMap(merged)
+        nextBase = merged
       } catch { /* reveal anyway */ }
       setVisibleCount(nextCount)
       setRevealing(false)
     }
-    prefetch(documentId, allRevealUnits, nextCount + 1)
+    prefetch(documentId, allRevealUnits, nextCount + 1, nextBase)
   }
 
   function handleReadLess() {
@@ -214,7 +269,6 @@ export default function ReadPage() {
         articleRef.current && !articleRef.current.contains(e.target as Node)
       ) {
         setSelection(null)
-        setExplanation(null)
         setExplainPanelOpen(false)
       }
     }
@@ -239,10 +293,11 @@ export default function ReadPage() {
       setHighlightPopover({ id, x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY + window.scrollY })
     })
     try {
-      range.surroundContents(mark)
+      mark.appendChild(range.extractContents())
+      range.insertNode(mark)
       setHighlights((prev) => [...prev, { id, text }])
     } catch {
-      toast.error('Cannot highlight across multiple elements.')
+      toast.error('Could not highlight selection.')
     }
     sel.removeAllRanges()
     setSelection(null)
@@ -266,7 +321,8 @@ export default function ReadPage() {
   async function handleExplain() {
     if (!selection || !documentId) return
     setExplaining(true)
-    setExplanation(null)
+    setConversationHistory([])
+    setFollowUpInput('')
     setExplainPanelOpen(true)
     setExplainedText(selection.text)
     const surroundingText = fullText ? (() => {
@@ -276,7 +332,7 @@ export default function ReadPage() {
     })() : ''
     try {
       const res = await api.explainSelection(documentId, selection.text, surroundingText)
-      setExplanation(res.explanation)
+      setConversationHistory([{ role: 'assistant', content: res.explanation }])
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Could not explain selection.')
       setExplainPanelOpen(false)
@@ -287,10 +343,34 @@ export default function ReadPage() {
     }
   }
 
+  async function handleFollowUp() {
+    if (!followUpInput.trim() || !documentId || !explainedText || followingUp) return
+    const question = followUpInput.trim()
+    const historyWithQuestion: ConversationMessage[] = [...conversationHistory, { role: 'user', content: question }]
+    setConversationHistory(historyWithQuestion)
+    setFollowUpInput('')
+    setFollowingUp(true)
+    try {
+      const surroundingText = fullText ? (() => {
+        const idx = fullText.indexOf(explainedText)
+        if (idx === -1) return ''
+        return fullText.slice(Math.max(0, idx - 200), idx + explainedText.length + 200)
+      })() : ''
+      const res = await api.explainSelection(documentId, explainedText, surroundingText, historyWithQuestion, question)
+      setConversationHistory((prev) => [...prev, { role: 'assistant', content: res.explanation }])
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Could not get a response.')
+      setConversationHistory(historyWithQuestion) // keep user message visible
+    } finally {
+      setFollowingUp(false)
+    }
+  }
+
   function saveExplainToHighlights() {
     if (!explainedText) return
     const id = `hl-${Date.now()}`
-    setHighlights((prev) => [...prev, { id, text: explainedText, explanation: explanation ?? undefined }])
+    const firstAnswer = conversationHistory.find((m) => m.role === 'assistant')?.content
+    setHighlights((prev) => [...prev, { id, text: explainedText, explanation: firstAnswer }])
     toast.success('Saved to highlights')
   }
 
@@ -303,73 +383,41 @@ export default function ReadPage() {
     )
   }
 
-  function renderWithKeyPhrases(text: string, keyPhrases: string[]) {
-    if (keyPhrases.length === 0) return <>{text}</>
-    const ranges: Array<{ start: number; end: number }> = []
-    for (const phrase of keyPhrases) {
-      const idx = text.toLowerCase().indexOf(phrase.toLowerCase())
-      if (idx !== -1) ranges.push({ start: idx, end: idx + phrase.length })
+  // Memoized so ReactMarkdown doesn't re-render paragraphs on selection state changes,
+  // which would clear the browser's text selection before the popover appears.
+  const mdComponents = useMemo(() => {
+    function annotatedParagraph(text: string) {
+      const sentences = splitSentences(text)
+      if (!annotationMap || sentences.length === 0) return <>{text}</>
+      return (
+        <>
+          {sentences.map((s, i) => {
+            const entry = annotationMap.get(s.trim().replace(/\s+/g, ' '))
+            const label = entry?.label
+            const keyPhrases = entry?.keyPhrases ?? []
+            return (
+              <span
+                key={i}
+                style={label === 'normal' ? { fontWeight: 300, color: '#0F172A' } : {}}
+              >
+                {renderWithKeyPhrases(s, keyPhrases)}{i < sentences.length - 1 ? ' ' : ''}
+              </span>
+            )
+          })}
+        </>
+      )
     }
-    if (ranges.length === 0) return <>{text}</>
-    ranges.sort((a, b) => a.start - b.start)
-    const merged: typeof ranges = []
-    for (const r of ranges) {
-      if (merged.length && r.start <= merged[merged.length - 1].end)
-        merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, r.end)
-      else merged.push({ ...r })
+    return {
+      h2: ({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) => {
+        const text = typeof children === 'string' ? children : String(children)
+        const id = slugify(text)
+        return <h2 id={id} {...props}>{children}</h2>
+      },
+      p: ({ children, ...props }: React.HTMLAttributes<HTMLParagraphElement>) => (
+        <p {...props}>{annotatedParagraph(extractText(children))}</p>
+      ),
     }
-    const segments: Array<{ text: string; isKey: boolean }> = []
-    let cursor = 0
-    for (const { start, end } of merged) {
-      if (start > cursor) segments.push({ text: text.slice(cursor, start), isKey: false })
-      segments.push({ text: text.slice(start, end), isKey: true })
-      cursor = end
-    }
-    if (cursor < text.length) segments.push({ text: text.slice(cursor), isKey: false })
-    return (
-      <>
-        {segments.map((seg, i) =>
-          seg.isKey
-            ? <span key={i} style={{ fontWeight: 700, color: '#0F172A' }}>{seg.text}</span>
-            : <span key={i}>{seg.text}</span>
-        )}
-      </>
-    )
-  }
-
-  function annotatedParagraph(text: string) {
-    const sentences = splitSentences(text)
-    if (!annotationMap || sentences.length === 0) return <>{text}</>
-    return (
-      <>
-        {sentences.map((s, i) => {
-          const entry = annotationMap.get(s.trim().replace(/\s+/g, ' '))
-          const label = entry?.label
-          const keyPhrases = entry?.keyPhrases ?? []
-          return (
-            <span
-              key={i}
-              style={label === 'normal' ? { fontWeight: 300, color: '#0F172A' } : {}}
-            >
-              {renderWithKeyPhrases(s, keyPhrases)}{i < sentences.length - 1 ? ' ' : ''}
-            </span>
-          )
-        })}
-      </>
-    )
-  }
-
-  // Custom markdown renderers — h2 gets scroll id, p gets sentence annotations
-  const mdComponents = {
-    h2: ({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) => {
-      const text = typeof children === 'string' ? children : String(children)
-      const id = slugify(text)
-      return <h2 id={id} {...props}>{children}</h2>
-    },
-    p: ({ children, ...props }: React.HTMLAttributes<HTMLParagraphElement>) => (
-      <p {...props}>{annotatedParagraph(extractText(children))}</p>
-    ),
-  }
+  }, [annotationMap])
 
   return (
     <div className="reading-page">
@@ -460,20 +508,21 @@ export default function ReadPage() {
             <div className="mt-10 pt-6 border-t border-border flex flex-col items-center gap-4">
               <span className="text-xs text-muted-foreground">{visibleCount} / {allRevealUnits.length} sections</span>
               <div className="flex items-center gap-3">
-                <button
-                  onClick={handleReadLess}
-                  disabled={visibleCount <= 1}
-                  className="px-4 py-2 rounded-lg text-sm border border-border hover:bg-muted/40 transition-colors disabled:opacity-30"
-                >
-                  Read Less
-                </button>
+                {visibleCount > 1 && (
+                  <button
+                    onClick={handleReadLess}
+                    className="px-4 py-2 rounded-lg text-sm border border-border hover:bg-muted/40 transition-colors"
+                  >
+                    Read Less
+                  </button>
+                )}
                 <button
                   onClick={handleReadMore}
                   disabled={visibleCount >= allRevealUnits.length || revealing}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm bg-foreground text-background hover:opacity-90 transition-opacity disabled:opacity-30"
                 >
                   {revealing && <div className="w-3 h-3 rounded-full border-2 border-background/30 border-t-background animate-spin" />}
-                  Read More
+                  {visibleCount === 1 ? 'Start Reading' : 'Read More'}
                 </button>
               </div>
               {visibleCount >= allRevealUnits.length && (
@@ -498,16 +547,22 @@ export default function ReadPage() {
             <div className="sticky top-20 rounded-lg border border-border bg-white/60 p-4 space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-xs uppercase tracking-widest text-muted-foreground">Explanation</p>
-                <button onClick={() => { setExplainPanelOpen(false); setExplanation(null) }} className="text-muted-foreground hover:text-foreground text-xs">✕</button>
+                <button onClick={() => setExplainPanelOpen(false)} className="text-muted-foreground hover:text-foreground text-xs">✕</button>
               </div>
+
+              {/* Selected text */}
+              {explainedText && (
+                <p className="text-xs text-muted-foreground italic border-l-2 border-border pl-2 leading-relaxed line-clamp-3">
+                  "{explainedText}"
+                </p>
+              )}
+
+              {/* Initial loading state */}
               {explaining ? (
                 <div className="space-y-3">
                   <div className="flex items-center gap-2.5">
                     <div className="w-3.5 h-3.5 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin shrink-0" />
-                    <p
-                      className="text-xs text-muted-foreground transition-opacity duration-300"
-                      style={{ opacity: explainFading ? 0 : 1 }}
-                    >
+                    <p className="text-xs text-muted-foreground transition-opacity duration-300" style={{ opacity: explainFading ? 0 : 1 }}>
                       {EXPLAIN_PHASES[explainPhase]}
                     </p>
                   </div>
@@ -517,14 +572,52 @@ export default function ReadPage() {
                     ))}
                   </div>
                 </div>
-              ) : explanation ? (
+              ) : conversationHistory.length > 0 ? (
                 <div className="space-y-3">
-                  {explainedText && (
-                    <p className="text-xs text-muted-foreground italic border-l-2 border-border pl-2 leading-relaxed line-clamp-3">
-                      "{explainedText}"
-                    </p>
-                  )}
-                  <p className="text-sm leading-relaxed" style={{ color: '#2D2D2D' }}>{explanation}</p>
+                  {/* Conversation messages */}
+                  <div className="space-y-2.5">
+                    {conversationHistory.map((msg, i) => (
+                      <div key={i} className={msg.role === 'user' ? 'flex justify-end' : ''}>
+                        <p
+                          className={`text-sm leading-relaxed ${
+                            msg.role === 'user'
+                              ? 'bg-muted/60 rounded-lg px-3 py-2 text-foreground max-w-[90%] text-right'
+                              : ''
+                          }`}
+                          style={msg.role === 'assistant' ? { color: '#2D2D2D' } : {}}
+                        >
+                          {msg.content}
+                        </p>
+                      </div>
+                    ))}
+                    {/* Follow-up loading indicator */}
+                    {followingUp && (
+                      <div className="flex items-center gap-1.5 pl-0.5">
+                        {[0,1,2].map((i) => <span key={i} className="typing-dot" style={{ animationDelay: `${i * 0.15}s` }} />)}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Follow-up input */}
+                  <div className="flex items-center gap-2 pt-1 border-t border-border">
+                    <input
+                      type="text"
+                      value={followUpInput}
+                      onChange={(e) => setFollowUpInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleFollowUp()}
+                      placeholder="Ask a follow-up…"
+                      disabled={followingUp}
+                      className="flex-1 text-xs bg-transparent outline-none placeholder:text-muted-foreground/60 disabled:opacity-50"
+                    />
+                    <button
+                      onClick={handleFollowUp}
+                      disabled={!followUpInput.trim() || followingUp}
+                      className="text-xs text-muted-foreground hover:text-foreground disabled:opacity-30 transition-colors shrink-0"
+                    >
+                      →
+                    </button>
+                  </div>
+
                   <button
                     onClick={saveExplainToHighlights}
                     className="text-xs text-muted-foreground hover:text-foreground transition-colors border border-border rounded-md px-2.5 py-1 hover:bg-muted/40"

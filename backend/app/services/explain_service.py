@@ -48,6 +48,25 @@ Relevant context retrieved from the document:
 Please explain the highlighted passage in 2–4 short, plain sentences. Each sentence should be concise and easy to read at a glance.
 """
 
+_FOLLOWUP_USER = """\
+The reader originally highlighted this passage:
+\"\"\"
+{selected_text}
+\"\"\"
+
+Relevant context from the document:
+\"\"\"
+{context}
+\"\"\"
+
+[Conversation so far]
+{history}
+
+Reader's follow-up question: {follow_up_question}
+
+Answer the follow-up question in 2–4 short, plain sentences. Stay grounded in the highlighted passage and document context.
+"""
+
 
 class ExplainService:
     def __init__(self, db: AsyncSession):
@@ -59,6 +78,8 @@ class ExplainService:
         document_id: str,
         selected_text: str,
         surrounding_text: str = "",
+        conversation_history: list[dict] | None = None,
+        follow_up_question: str | None = None,
     ) -> str:
         """
         Explain the highlighted text.
@@ -109,12 +130,26 @@ class ExplainService:
         else:
             context = context[:5000]  # cap to avoid prompt bloat
 
-        explanation = await chat_completion(
-            system_prompt=_EXPLAIN_SYSTEM,
-            user_prompt=_EXPLAIN_USER.format(
+        if follow_up_question and conversation_history:
+            history_text = "\n".join(
+                f"{'Reader' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
+                for m in conversation_history
+            )
+            user_prompt = _FOLLOWUP_USER.format(
                 selected_text=selected_text,
                 context=context,
-            ),
+                history=history_text,
+                follow_up_question=follow_up_question,
+            )
+        else:
+            user_prompt = _EXPLAIN_USER.format(
+                selected_text=selected_text,
+                context=context,
+            )
+
+        explanation = await chat_completion(
+            system_prompt=_EXPLAIN_SYSTEM,
+            user_prompt=user_prompt,
             response_format="text",
         )
         logger.info(
