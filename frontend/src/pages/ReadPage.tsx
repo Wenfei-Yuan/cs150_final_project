@@ -4,8 +4,8 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { toast } from 'sonner'
 import { api, type FollowUpTurn } from '@/lib/api'
 
-type Heading = { id: string; text: string }
-type Highlight = { id: string; text: string; explanation?: string }
+type Heading = { id: string; text: string; chunkIndex: number }
+type Highlight = { id: string; text: string; explanation?: string; followUpHistory?: FollowUpTurn[] }
 
 function slugify(text: string) {
   return text.toLowerCase().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-')
@@ -71,6 +71,7 @@ export default function ReadPage() {
   const [highlights, setHighlights] = useState<Highlight[]>([])
   const [highlightsPanelOpen, setHighlightsPanelOpen] = useState(false)
   const [highlightPopover, setHighlightPopover] = useState<{ id: string; x: number; y: number } | null>(null)
+  const [expandedHighlightId, setExpandedHighlightId] = useState<string | null>(null)
 
   // Explain state
   const [selection, setSelection] = useState<{ text: string; x: number; y: number } | null>(null)
@@ -89,10 +90,13 @@ export default function ReadPage() {
   const [visibleCount, setVisibleCount] = useState(1)
   const [revealing, setRevealing] = useState(false)
   const [allRevealUnits, setAllRevealUnits] = useState<string[]>([])
+  const [allChunkSections, setAllChunkSections] = useState<(string | null)[]>([])
   const [loadingChunks, setLoadingChunks] = useState(true)
   const preloadCache = useRef(new Map<number, Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }>>())
   const articleRef = useRef<HTMLDivElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
+  const pendingScrollId = useRef<string | null>(null)
+  const pendingRevealUnitIdx = useRef<number | null>(null)
 
   const isMarkdown = !!state?.filename?.endsWith('.md')
 
@@ -150,17 +154,40 @@ export default function ReadPage() {
     preloadCache.current.clear()
     api.getAdhdChunks(documentId)
       .then(async (res) => {
-        const units = res.chunks.map((c) => c.paragraphs.join('\n\n'))
-        setAllRevealUnits(units)
-        if (units.length > 0) {
+        const HR_RE = /^[-*_](\s*[-*_]){2,}\s*$/
+        const mergedUnits: string[] = []
+        const mergedSections: (string | null)[] = []
+        let carry: string[] = []
+
+        for (const c of res.chunks) {
+          const paras = c.paragraphs.map((p) => p.trim()).filter(Boolean)
+          const isHrOnly = paras.length > 0 && paras.every((p) => HR_RE.test(p))
+          if (isHrOnly) {
+            carry.push(...paras)
+            continue
+          }
+
+          const prefix = carry.length > 0 ? `${carry.join('\n\n')}\n\n` : ''
+          mergedUnits.push(prefix + paras.join('\n\n'))
+          mergedSections.push(c.section)
+          carry = []
+        }
+
+        if (carry.length > 0 && mergedUnits.length > 0) {
+          mergedUnits[mergedUnits.length - 1] = `${mergedUnits[mergedUnits.length - 1]}\n\n${carry.join('\n\n')}`
+        }
+
+        setAllRevealUnits(mergedUnits)
+        setAllChunkSections(mergedSections)
+        if (mergedUnits.length > 0) {
           try {
-            const annotRes = await api.annotateText(documentId, units.slice(0, 1))
+            const annotRes = await api.annotateText(documentId, mergedUnits.slice(0, 1))
             const map = buildAnnotationMap(annotRes)
             preloadCache.current.set(1, map)
             setAnnotationMap(map)
-            prefetch(documentId, units, 2, map)
+            prefetch(documentId, mergedUnits, 2, map)
           } catch {
-            prefetch(documentId, units, 2, null)
+            prefetch(documentId, mergedUnits, 2, null)
           }
         }
       })
@@ -174,6 +201,7 @@ export default function ReadPage() {
     if (nextCount === visibleCount) return
 
     let nextBase: Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null = null
+    pendingRevealUnitIdx.current = nextCount - 1
     if (preloadCache.current.has(nextCount)) {
       nextBase = preloadCache.current.get(nextCount)!
       setAnnotationMap(nextBase)
@@ -199,7 +227,10 @@ export default function ReadPage() {
     setVisibleCount(prevCount)
   }
 
-  // Extract H2 headings from markdown
+  // Extract H2 headings and map each to its chunk index.
+  // Primary: match against the chunk's section metadata field (works even when the
+  // heading text isn't in the rendered chunk body).
+  // Fallback: substring search of chunk text.
   const headings = useMemo<Heading[]>(() => {
     if (!isMarkdown || !fullText) return []
     return fullText
@@ -207,9 +238,16 @@ export default function ReadPage() {
       .filter((line) => /^## /.test(line))
       .map((line) => {
         const text = line.replace(/^## /, '').trim()
-        return { id: slugify(text), text }
+        const needle = text.toLowerCase()
+        const normalize = (s: string) =>
+          s.replace(/^#+\s*/, '').replace(/^\d+(\.\d+)*\s+/, '').trim().toLowerCase()
+        const bySection = allChunkSections.findIndex((s) => normalize(s ?? '') === needle)
+        const chunkIndex = bySection !== -1
+          ? bySection
+          : allRevealUnits.findIndex((u) => u.includes(`## ${text}`))
+        return { id: slugify(text), text, chunkIndex }
       })
-  }, [fullText, isMarkdown])
+  }, [fullText, isMarkdown, allRevealUnits, allChunkSections])
 
   // Track active heading while scrolling
   useEffect(() => {
@@ -249,10 +287,63 @@ export default function ReadPage() {
     return () => clearInterval(id)
   }, [explaining])
 
-  function scrollToHeading(id: string) {
-    const el = document.getElementById(id)
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  async function scrollToHeading(id: string, chunkIndex: number) {
+    // chunkIndex === -1 means we couldn't find the chunk — try a direct scroll in case
+    // the heading element already exists in the DOM (e.g. it's in a visible chunk).
+    if (chunkIndex === -1) {
+      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    const requiredCount = chunkIndex + 1
+    if (requiredCount > visibleCount) {
+      setRevealing(true)
+      try {
+        let currentMap = annotationMap
+        for (let n = visibleCount + 1; n <= requiredCount; n++) {
+          if (preloadCache.current.has(n)) {
+            currentMap = preloadCache.current.get(n)!
+          } else if (documentId) {
+            try {
+              const res = await api.annotateText(documentId, allRevealUnits.slice(0, n))
+              currentMap = mergeAnnotationMap(currentMap, res)
+              preloadCache.current.set(n, currentMap)
+            } catch { /* keep going */ }
+          }
+        }
+        setAnnotationMap(currentMap)
+        setVisibleCount(requiredCount)
+        pendingScrollId.current = id
+      } finally {
+        setRevealing(false)
+      }
+    } else {
+      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
   }
+
+  // Fire pending scroll after visibleCount DOM update
+  useEffect(() => {
+    if (!pendingScrollId.current) return
+    const id = pendingScrollId.current
+    pendingScrollId.current = null
+    requestAnimationFrame(() => {
+      document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    })
+  }, [visibleCount])
+
+  // After "Read More", scroll to the newly revealed unit with a top offset (~20vh).
+  useEffect(() => {
+    if (pendingRevealUnitIdx.current === null) return
+    const unitIdx = pendingRevealUnitIdx.current
+    pendingRevealUnitIdx.current = null
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-reveal-unit="${unitIdx}"]`)
+      if (!el) return
+      const top = el.getBoundingClientRect().top + window.scrollY
+      const offset = window.innerHeight * 0.10
+      window.scrollTo({ top: Math.max(0, top - offset), behavior: 'smooth' })
+    })
+  }, [visibleCount])
 
   // Handle text selection
   function handleMouseUp() {
@@ -353,7 +444,12 @@ export default function ReadPage() {
   function saveExplainToHighlights() {
     if (!explainedText) return
     const id = `hl-${Date.now()}`
-    setHighlights((prev) => [...prev, { id, text: explainedText, explanation: explanation ?? undefined }])
+    setHighlights((prev) => [...prev, {
+      id,
+      text: explainedText,
+      explanation: explanation ?? undefined,
+      followUpHistory: followUpHistory.length > 0 ? [...followUpHistory] : undefined,
+    }])
     toast.success('Saved to highlights')
   }
 
@@ -370,15 +466,6 @@ export default function ReadPage() {
     } finally {
       setFollowUpLoading(false)
     }
-  }
-
-
-  if (error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-sm text-destructive">{error}</p>
-      </div>
-    )
   }
 
   // Stable across selection state changes — only recreates when annotations update.
@@ -417,6 +504,14 @@ export default function ReadPage() {
     ),
   }), [annotatedParagraph])
 
+  if (error) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <p className="text-sm text-destructive">{error}</p>
+      </div>
+    )
+  }
+
   return (
     <div className="reading-page">
       {/* Top bar */}
@@ -438,12 +533,18 @@ export default function ReadPage() {
           <div className="sticky top-20 space-y-6">
             {headings.length > 0 && (
               <div className="space-y-1">
-                <p className="text-[10px] uppercase tracking-widest text-muted-foreground mb-3">Contents</p>
+                <div className="flex items-center gap-2 mb-3">
+                  <p className="text-[10px] uppercase tracking-widest text-muted-foreground">Contents</p>
+                  {revealing && (
+                    <div className="w-3 h-3 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin shrink-0" />
+                  )}
+                </div>
                 {headings.map((h) => (
                   <button
                     key={h.id}
-                    onClick={() => scrollToHeading(h.id)}
-                    className={`block w-full text-left text-xs leading-snug px-2 py-1.5 rounded transition-colors ${
+                    onClick={() => scrollToHeading(h.id, h.chunkIndex)}
+                    disabled={revealing}
+                    className={`block w-full text-left text-xs leading-snug px-2 py-1.5 rounded transition-colors disabled:opacity-50 ${
                       activeHeading === h.id
                         ? 'text-foreground font-medium bg-black/5'
                         : 'text-muted-foreground hover:text-foreground'
@@ -491,13 +592,21 @@ export default function ReadPage() {
           ) : (
             <div ref={articleRef} onMouseUp={handleMouseUp} className="prose reading-prose select-text">
               {isMarkdown
-                ? <ReactMarkdown components={mdComponents}>{allRevealUnits.slice(0, visibleCount).join('\n\n')}</ReactMarkdown>
-                : allRevealUnits.slice(0, visibleCount)
-                    .flatMap((unit, ui) =>
-                      unit.split(/\n\n+/).filter((p) => p.trim()).map((para, pi) => (
+                ? allRevealUnits.slice(0, visibleCount).map((unit, ui) => (
+                  <div key={ui} data-reveal-unit={ui}>
+                    <ReactMarkdown components={mdComponents}>{unit}</ReactMarkdown>
+                  </div>
+                ))
+                : allRevealUnits.slice(0, visibleCount).map((unit, ui) => (
+                  <div key={ui} data-reveal-unit={ui}>
+                    {unit
+                      .split(/\n\n+/)
+                      .filter((p) => p.trim())
+                      .map((para, pi) => (
                         <p key={`${ui}-${pi}`} className="mb-6">{annotatedParagraph(para.trim())}</p>
-                      ))
-                    )
+                      ))}
+                  </div>
+                ))
               }
             </div>
           )}
@@ -696,27 +805,50 @@ export default function ReadPage() {
               {highlights.length === 0 ? (
                 <p className="text-sm text-muted-foreground px-5 py-6 text-center">No highlights yet.</p>
               ) : highlights.map((h) => (
-                <div key={h.id} className="flex items-start gap-3 px-5 py-4 group hover:bg-muted/30 transition-colors">
-                  <span style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: '#FDE68A', flexShrink: 0, marginTop: 4 }} />
-                  <div className="flex-1 min-w-0 space-y-1.5">
+                <div key={h.id} className="px-5 py-4 group hover:bg-muted/30 transition-colors">
+                  <div className="flex items-start gap-3">
+                    <span style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: '#FDE68A', flexShrink: 0, marginTop: 4 }} />
+                    <div className="flex-1 min-w-0 space-y-1.5">
+                      <button
+                        onClick={() => { scrollToHighlight(h.id); setHighlightsPanelOpen(false) }}
+                        className="text-left text-sm text-foreground leading-snug hover:underline w-full"
+                      >
+                        {h.text}
+                      </button>
+                      {h.explanation && (
+                        <p className="text-xs text-muted-foreground leading-relaxed border-l-2 border-border pl-2">
+                          {h.explanation}
+                        </p>
+                      )}
+                      {h.followUpHistory && h.followUpHistory.length > 0 && (
+                        <div>
+                          <button
+                            onClick={() => setExpandedHighlightId(expandedHighlightId === h.id ? null : h.id)}
+                            className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors mt-1"
+                          >
+                            <span style={{ display: 'inline-block', transition: 'transform 0.15s', transform: expandedHighlightId === h.id ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
+                            {h.followUpHistory.length} follow-up{h.followUpHistory.length !== 1 ? 's' : ''}
+                          </button>
+                          {expandedHighlightId === h.id && (
+                            <div className="mt-2 space-y-2 pl-2 border-l-2 border-border">
+                              {h.followUpHistory.map((turn, i) => (
+                                <div key={i} className="space-y-0.5">
+                                  <p className="text-[11px] font-medium text-foreground leading-snug">Q: {turn.question}</p>
+                                  <p className="text-[11px] text-muted-foreground leading-relaxed">{turn.answer}</p>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                     <button
-                      onClick={() => { scrollToHighlight(h.id); setHighlightsPanelOpen(false) }}
-                      className="text-left text-sm text-foreground leading-snug hover:underline w-full"
+                      onClick={() => removeHighlight(h.id)}
+                      className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground text-xs transition-opacity shrink-0 mt-0.5"
                     >
-                      {h.text}
+                      ✕
                     </button>
-                    {h.explanation && (
-                      <p className="text-xs text-muted-foreground leading-relaxed border-l-2 border-border pl-2">
-                        {h.explanation}
-                      </p>
-                    )}
                   </div>
-                  <button
-                    onClick={() => removeHighlight(h.id)}
-                    className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground text-xs transition-opacity shrink-0 mt-0.5"
-                  >
-                    ✕
-                  </button>
                 </div>
               ))}
             </div>
