@@ -23,6 +23,40 @@ function splitSentences(text: string): string[] {
   return text.split(/(?<=[.!?])\s+(?=[A-Z"])/).filter((s) => s.trim())
 }
 
+function renderWithKeyPhrases(text: string, keyPhrases: string[]) {
+  if (keyPhrases.length === 0) return <>{text}</>
+  const ranges: Array<{ start: number; end: number }> = []
+  for (const phrase of keyPhrases) {
+    const idx = text.toLowerCase().indexOf(phrase.toLowerCase())
+    if (idx !== -1) ranges.push({ start: idx, end: idx + phrase.length })
+  }
+  if (ranges.length === 0) return <>{text}</>
+  ranges.sort((a, b) => a.start - b.start)
+  const merged: typeof ranges = []
+  for (const r of ranges) {
+    if (merged.length && r.start <= merged[merged.length - 1].end)
+      merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, r.end)
+    else merged.push({ ...r })
+  }
+  const segments: Array<{ text: string; isKey: boolean }> = []
+  let cursor = 0
+  for (const { start, end } of merged) {
+    if (start > cursor) segments.push({ text: text.slice(cursor, start), isKey: false })
+    segments.push({ text: text.slice(start, end), isKey: true })
+    cursor = end
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor), isKey: false })
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.isKey
+          ? <span key={i} style={{ fontWeight: 700, color: '#0F172A' }}>{seg.text}</span>
+          : <span key={i}>{seg.text}</span>
+      )}
+    </>
+  )
+}
+
 export default function ReadPage() {
   const { sessionId } = useParams<{ sessionId: string }>()
   const navigate = useNavigate()
@@ -88,10 +122,24 @@ export default function ReadPage() {
     return map
   }
 
-  function prefetch(docId: string, units: string[], count: number) {
+  function mergeAnnotationMap(
+    existing: Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null,
+    res: Awaited<ReturnType<typeof api.annotateText>>
+  ) {
+    const map = new Map(existing ?? [])
+    res.annotations.forEach(({ text, label, key_phrases }) => {
+      const key = text.trim().replace(/\s+/g, ' ')
+      if (!map.has(key))
+        map.set(key, { label: label as 'fade' | 'normal', keyPhrases: key_phrases ?? [] })
+    })
+    return map
+  }
+
+  function prefetch(docId: string, units: string[], count: number, baseMap: Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null) {
     if (count > units.length || preloadCache.current.has(count)) return
+    const prevMap = preloadCache.current.get(count - 1) ?? baseMap
     api.annotateText(docId, units.slice(0, count))
-      .then((r) => preloadCache.current.set(count, buildAnnotationMap(r)))
+      .then((r) => preloadCache.current.set(count, mergeAnnotationMap(prevMap, r)))
       .catch(() => {})
   }
 
@@ -110,8 +158,10 @@ export default function ReadPage() {
             const map = buildAnnotationMap(annotRes)
             preloadCache.current.set(1, map)
             setAnnotationMap(map)
-          } catch { /* reveal without annotations */ }
-          prefetch(documentId, units, 2)
+            prefetch(documentId, units, 2, map)
+          } catch {
+            prefetch(documentId, units, 2, null)
+          }
         }
       })
       .catch(() => {})
@@ -123,21 +173,24 @@ export default function ReadPage() {
     const nextCount = Math.min(allRevealUnits.length, visibleCount + 1)
     if (nextCount === visibleCount) return
 
+    let nextBase: Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null = null
     if (preloadCache.current.has(nextCount)) {
-      setAnnotationMap(preloadCache.current.get(nextCount)!)
+      nextBase = preloadCache.current.get(nextCount)!
+      setAnnotationMap(nextBase)
       setVisibleCount(nextCount)
     } else {
       setRevealing(true)
       try {
         const res = await api.annotateText(documentId, allRevealUnits.slice(0, nextCount))
-        const map = buildAnnotationMap(res)
-        preloadCache.current.set(nextCount, map)
-        setAnnotationMap(map)
+        const merged = mergeAnnotationMap(annotationMap, res)
+        preloadCache.current.set(nextCount, merged)
+        setAnnotationMap(merged)
+        nextBase = merged
       } catch { /* reveal anyway */ }
       setVisibleCount(nextCount)
       setRevealing(false)
     }
-    prefetch(documentId, allRevealUnits, nextCount + 1)
+    prefetch(documentId, allRevealUnits, nextCount + 1, nextBase)
   }
 
   function handleReadLess() {
@@ -246,10 +299,11 @@ export default function ReadPage() {
       setHighlightPopover({ id, x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY + window.scrollY })
     })
     try {
-      range.surroundContents(mark)
+      mark.appendChild(range.extractContents())
+      range.insertNode(mark)
       setHighlights((prev) => [...prev, { id, text }])
     } catch {
-      toast.error('Cannot highlight across multiple elements.')
+      toast.error('Could not highlight selection.')
     }
     sel.removeAllRanges()
     setSelection(null)
@@ -327,41 +381,10 @@ export default function ReadPage() {
     )
   }
 
-  function renderWithKeyPhrases(text: string, keyPhrases: string[]) {
-    if (keyPhrases.length === 0) return <>{text}</>
-    const ranges: Array<{ start: number; end: number }> = []
-    for (const phrase of keyPhrases) {
-      const idx = text.toLowerCase().indexOf(phrase.toLowerCase())
-      if (idx !== -1) ranges.push({ start: idx, end: idx + phrase.length })
-    }
-    if (ranges.length === 0) return <>{text}</>
-    ranges.sort((a, b) => a.start - b.start)
-    const merged: typeof ranges = []
-    for (const r of ranges) {
-      if (merged.length && r.start <= merged[merged.length - 1].end)
-        merged[merged.length - 1].end = Math.max(merged[merged.length - 1].end, r.end)
-      else merged.push({ ...r })
-    }
-    const segments: Array<{ text: string; isKey: boolean }> = []
-    let cursor = 0
-    for (const { start, end } of merged) {
-      if (start > cursor) segments.push({ text: text.slice(cursor, start), isKey: false })
-      segments.push({ text: text.slice(start, end), isKey: true })
-      cursor = end
-    }
-    if (cursor < text.length) segments.push({ text: text.slice(cursor), isKey: false })
-    return (
-      <>
-        {segments.map((seg, i) =>
-          seg.isKey
-            ? <span key={i} style={{ fontWeight: 700, color: '#0F172A' }}>{seg.text}</span>
-            : <span key={i}>{seg.text}</span>
-        )}
-      </>
-    )
-  }
-
-  function annotatedParagraph(text: string) {
+  // Stable across selection state changes — only recreates when annotations update.
+  // This prevents ReactMarkdown from re-rendering paragraphs (which would clear
+  // the browser's text selection before the Highlight/Explain popover appears).
+  const annotatedParagraph = useMemo(() => (text: string) => {
     const sentences = splitSentences(text)
     if (!annotationMap || sentences.length === 0) return <>{text}</>
     return (
@@ -381,10 +404,9 @@ export default function ReadPage() {
         })}
       </>
     )
-  }
+  }, [annotationMap])
 
-  // Custom markdown renderers — h2 gets scroll id, p gets sentence annotations
-  const mdComponents = {
+  const mdComponents = useMemo(() => ({
     h2: ({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) => {
       const text = typeof children === 'string' ? children : String(children)
       const id = slugify(text)
@@ -393,7 +415,7 @@ export default function ReadPage() {
     p: ({ children, ...props }: React.HTMLAttributes<HTMLParagraphElement>) => (
       <p {...props}>{annotatedParagraph(extractText(children))}</p>
     ),
-  }
+  }), [annotatedParagraph])
 
   return (
     <div className="reading-page">
@@ -484,20 +506,21 @@ export default function ReadPage() {
             <div className="mt-10 pt-6 border-t border-border flex flex-col items-center gap-4">
               <span className="text-xs text-muted-foreground">{visibleCount} / {allRevealUnits.length} sections</span>
               <div className="flex items-center gap-3">
-                <button
-                  onClick={handleReadLess}
-                  disabled={visibleCount <= 1}
-                  className="px-4 py-2 rounded-lg text-sm border border-border hover:bg-muted/40 transition-colors disabled:opacity-30"
-                >
-                  Read Less
-                </button>
+                {visibleCount > 1 && (
+                  <button
+                    onClick={handleReadLess}
+                    className="px-4 py-2 rounded-lg text-sm border border-border hover:bg-muted/40 transition-colors"
+                  >
+                    Read Less
+                  </button>
+                )}
                 <button
                   onClick={handleReadMore}
                   disabled={visibleCount >= allRevealUnits.length || revealing}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm bg-foreground text-background hover:opacity-90 transition-opacity disabled:opacity-30"
                 >
                   {revealing && <div className="w-3 h-3 rounded-full border-2 border-background/30 border-t-background animate-spin" />}
-                  Read More
+                  {visibleCount === 1 ? 'Start Reading' : 'Read More'}
                 </button>
               </div>
               {visibleCount >= allRevealUnits.length && (
