@@ -4,6 +4,8 @@
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/inter";
 @import "@fontsource/atkinson-hyperlegible";
+@import "@fontsource-variable/lexend";
+@import "@fontsource/lora";
 
 @custom-variant dark (&:is(.dark *));
 

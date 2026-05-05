@@ -89,6 +89,11 @@ export default function ReadPage() {
   const [annotationMap, setAnnotationMap] = useState<Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null>(null)
   const [visibleCount, setVisibleCount] = useState(1)
   const [revealing, setRevealing] = useState(false)
+  // Reading preferences
+  const [stepSize, setStepSize] = useState(1)
+  const [fontSize, setFontSize] = useState(16)
+  const [fontFamily, setFontFamily] = useState<'default' | 'lexend' | 'atkinson' | 'lora'>('default')
+  const [stressingEnabled, setStressingEnabled] = useState(true)
   const [allRevealUnits, setAllRevealUnits] = useState<string[]>([])
   const [allChunkSections, setAllChunkSections] = useState<(string | null)[]>([])
   const [loadingChunks, setLoadingChunks] = useState(true)
@@ -197,7 +202,7 @@ export default function ReadPage() {
 
   async function handleReadMore() {
     if (!documentId || revealing) return
-    const nextCount = Math.min(allRevealUnits.length, visibleCount + 1)
+    const nextCount = Math.min(allRevealUnits.length, visibleCount + stepSize)
     if (nextCount === visibleCount) return
 
     let nextBase: Map<string, { label: 'fade' | 'normal'; keyPhrases: string[] }> | null = null
@@ -218,11 +223,11 @@ export default function ReadPage() {
       setVisibleCount(nextCount)
       setRevealing(false)
     }
-    prefetch(documentId, allRevealUnits, nextCount + 1, nextBase)
+    prefetch(documentId, allRevealUnits, nextCount + stepSize, nextBase)
   }
 
   function handleReadLess() {
-    const prevCount = Math.max(1, visibleCount - 1)
+    const prevCount = Math.max(1, visibleCount - stepSize)
     if (preloadCache.current.has(prevCount)) setAnnotationMap(preloadCache.current.get(prevCount)!)
     setVisibleCount(prevCount)
   }
@@ -468,12 +473,10 @@ export default function ReadPage() {
     }
   }
 
-  // Stable across selection state changes — only recreates when annotations update.
-  // This prevents ReactMarkdown from re-rendering paragraphs (which would clear
-  // the browser's text selection before the Highlight/Explain popover appears).
+  // Stable across selection state changes — only recreates when annotations or stressing toggle changes.
   const annotatedParagraph = useMemo(() => (text: string) => {
     const sentences = splitSentences(text)
-    if (!annotationMap || sentences.length === 0) return <>{text}</>
+    if (!stressingEnabled || !annotationMap || sentences.length === 0) return <>{text}</>
     return (
       <>
         {sentences.map((s, i) => {
@@ -491,7 +494,7 @@ export default function ReadPage() {
         })}
       </>
     )
-  }, [annotationMap])
+  }, [annotationMap, stressingEnabled])
 
   const mdComponents = useMemo(() => ({
     h2: ({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) => {
@@ -556,15 +559,97 @@ export default function ReadPage() {
               </div>
             )}
 
-            {highlights.length > 0 && (
-              <button
-                onClick={() => setHighlightsPanelOpen(true)}
-                className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1.5 rounded hover:bg-black/5 w-full text-left"
-              >
-                <span style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: '#FDE68A', display: 'inline-block', flexShrink: 0 }} />
-                {highlights.length} highlight{highlights.length !== 1 ? 's' : ''}
-              </button>
-            )}
+            {/* Reading preferences */}
+            <div className="space-y-4 pt-1">
+              <p className="text-[10px] uppercase tracking-widest text-muted-foreground">Reading preferences</p>
+
+              {/* Font family */}
+              <div className="space-y-1.5">
+                <p className="text-[11px] text-muted-foreground">Font</p>
+                <div className="flex flex-wrap gap-1">
+                  {([
+                    ['default', 'Default'],
+                    ['lexend', 'Lexend'],
+                    ['atkinson', 'Atkinson'],
+                    ['lora', 'Lora'],
+                  ] as const).map(([f, label]) => (
+                    <button
+                      key={f}
+                      onClick={() => setFontFamily(f)}
+                      className={`text-[11px] px-2 py-0.5 rounded border transition-colors ${
+                        fontFamily === f
+                          ? 'border-foreground text-foreground font-medium'
+                          : 'border-border text-muted-foreground hover:border-foreground/40'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Font size */}
+              <div className="space-y-1.5">
+                <p className="text-[11px] text-muted-foreground">Font size</p>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setFontSize((s) => Math.max(12, s - 2))}
+                    className="w-6 h-6 flex items-center justify-center rounded border border-border hover:bg-muted/40 text-xs text-muted-foreground"
+                  >–</button>
+                  <span className="text-xs w-8 text-center tabular-nums">{fontSize}px</span>
+                  <button
+                    onClick={() => setFontSize((s) => Math.min(24, s + 2))}
+                    className="w-6 h-6 flex items-center justify-center rounded border border-border hover:bg-muted/40 text-xs text-muted-foreground"
+                  >+</button>
+                </div>
+              </div>
+
+              {/* Chunk size */}
+              <div className="space-y-1.5">
+                <p className="text-[11px] text-muted-foreground">Chunk size</p>
+                <p className="text-[10px] text-muted-foreground/60 leading-snug">Sections revealed per step</p>
+                <div className="flex items-center gap-1">
+                  {[1, 2, 3].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setStepSize(n)}
+                      className={`text-xs px-2 py-0.5 rounded border transition-colors ${
+                        stepSize === n
+                          ? 'border-foreground text-foreground font-medium'
+                          : 'border-border text-muted-foreground hover:border-foreground/40'
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Paragraph stressing toggle */}
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <p className="text-[11px] text-foreground">Stressing</p>
+                  <p className="text-[10px] text-muted-foreground/60 leading-snug">Highlights key sentences</p>
+                </div>
+                <button
+                  onClick={() => setStressingEnabled((e) => !e)}
+                  style={{
+                    width: 32, height: 18, borderRadius: 9, flexShrink: 0,
+                    backgroundColor: stressingEnabled ? '#0F172A' : '#CBD5E1',
+                    position: 'relative', transition: 'background-color 0.2s',
+                  }}
+                >
+                  <span style={{
+                    position: 'absolute', top: 2, borderRadius: '50%',
+                    width: 14, height: 14, backgroundColor: 'white',
+                    left: stressingEnabled ? 16 : 2,
+                    transition: 'left 0.2s',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.15)',
+                  }} />
+                </button>
+              </div>
+            </div>
+
           </div>
         </aside>
 
@@ -590,7 +675,20 @@ export default function ReadPage() {
               ))}
             </div>
           ) : (
-            <div ref={articleRef} onMouseUp={handleMouseUp} className="prose reading-prose select-text">
+            <div
+              ref={articleRef}
+              onMouseUp={handleMouseUp}
+              className="prose reading-prose select-text"
+              style={{
+                fontSize: `${fontSize}px`,
+                fontFamily: {
+                  default: undefined,
+                  lexend: "'Lexend Variable', 'Lexend', sans-serif",
+                  atkinson: "'Atkinson Hyperlegible', sans-serif",
+                  lora: "'Lora', serif",
+                }[fontFamily],
+              }}
+            >
               {isMarkdown
                 ? allRevealUnits.slice(0, visibleCount).map((unit, ui) => (
                   <div key={ui} data-reveal-unit={ui}>
@@ -640,14 +738,25 @@ export default function ReadPage() {
 
         </div>
 
-        {/* Right: hint + explain panel */}
+        {/* Right: highlights + hint + explain panel */}
         <div>
           {!loadingText && !explainPanelOpen && (
-            <div className="sticky top-20 rounded-lg border border-border bg-muted/30 p-4 space-y-1">
-              <p className="text-xs uppercase tracking-widest text-muted-foreground">Tip</p>
-              <p className="text-sm text-foreground leading-relaxed">
-                Highlight any text to <span className="font-medium">save it</span> or ask for an <span className="font-medium">AI explanation</span>.
-              </p>
+            <div className="sticky top-20 space-y-3">
+              {highlights.length > 0 && (
+                <button
+                  onClick={() => setHighlightsPanelOpen(true)}
+                  className="flex items-center gap-2 w-full rounded-lg border border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors text-left"
+                >
+                  <span style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: '#FDE68A', display: 'inline-block', flexShrink: 0 }} />
+                  {highlights.length} highlight{highlights.length !== 1 ? 's' : ''}
+                </button>
+              )}
+              <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-1">
+                <p className="text-xs uppercase tracking-widest text-muted-foreground">Tip</p>
+                <p className="text-sm text-foreground leading-relaxed">
+                  Highlight any text to <span className="font-medium">save it</span> or ask for an <span className="font-medium">AI explanation</span>.
+                </p>
+              </div>
             </div>
           )}
           {explainPanelOpen && (
